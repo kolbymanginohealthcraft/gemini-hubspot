@@ -1,0 +1,29 @@
+HUBSPOT FACILITY IMPORT STRATEGY
+==================================================
+
+IMPORT STRATEGY:
+1. SNF Facilities - UPDATE existing records
+2. SNF Facilities - IMPORT new records
+3. ALF Facilities - IMPORT all as new records
+
+PROCESSING RESULTS:
+- SNF facilities to UPDATE: 16077 records
+  -> Use 'Update existing records' in HubSpot
+  -> Match on 'Record ID' field
+
+- NEW SNF facilities to import: 14 records
+  -> Use 'Create new records' in HubSpot
+
+- NEW ALF facilities to import: 32632 records
+  -> Use 'Create new records' in HubSpot
+
+IMPORT ORDER:
+1. First: Import new SNF facilities
+2. Second: Import all ALF facilities
+3. Last: Update existing SNF facilities
+
+TOTAL RECORDS TO PROCESS:
+- SNF Updates: 16077
+- SNF New: 14
+- ALF New: 32632
+- Grand Total: 48723
