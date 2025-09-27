@@ -133,17 +133,9 @@ def process_facilities_from_masterorg(master_df):
         'Zip Code': facilities['Zip code'].apply(format_zip_code),
         'Phone Number': facilities['Organization phone'].apply(format_phone_number),
         'NPI': facilities['Facility primary NPI'].fillna(''),
-        'Facility website': '',  # Not available in MasterORG
+        'Facility website': facilities['Facility website'].fillna(''),
         'Total Beds': facilities['Number of staffed beds'].fillna(''),
-        'DHC ID': facilities['Facility definitive ID'],
-        'Network Name': facilities['Network'].fillna(''),
-        'Company Status': facilities['Facility status'],
-        'Ownership': facilities['Ownership'].fillna(''),
-        'Region': facilities['Region'],
-        'County': facilities['County'],
-        'Record Source': 'Definitive Healthcare',
-        'Is Gemini Prospect': '',
-        'Is Tricura Prospect': ''
+        'DHC ID': facilities['Facility definitive ID']
     })
     
     # Create full address columns
@@ -194,6 +186,7 @@ def process_companies_from_masterorg(master_df):
         'State/Region': companies['State'],
         'Postal Code': companies['Zip code'].apply(format_zip_code),
         'Phone Number': companies['Organization phone'].apply(format_phone_number),
+        'Website URL': companies['Facility website'].fillna(''),
         'Country/Region': 'United States',
         'Lifecycle Stage': 'Lead'
     })
@@ -267,7 +260,7 @@ def main():
     print("=" * 60)
     
     # Create output directories
-    os.makedirs("masterorg_output", exist_ok=True)
+    os.makedirs("formatted_data", exist_ok=True)
     os.makedirs("hubspot_updates", exist_ok=True)
     
     try:
@@ -286,9 +279,9 @@ def main():
         # Save formatted data
         if not facilities_df.empty and not companies_df.empty:
             log_step("Saving formatted data")
-            facilities_df.to_csv("masterorg_output/formatted_facilities.csv", index=False)
-            companies_df.to_csv("masterorg_output/formatted_companies.csv", index=False)
-            log_step("  Saved files", "masterorg_output/formatted_facilities.csv, masterorg_output/formatted_companies.csv")
+            facilities_df.to_csv("formatted_data/formatted_facilities.csv", index=False)
+            companies_df.to_csv("formatted_data/formatted_companies.csv", index=False)
+            log_step("  Saved files", "formatted_data/formatted_facilities.csv, formatted_data/formatted_companies.csv")
             
             # Generate summary
             print("\n" + "=" * 60)
