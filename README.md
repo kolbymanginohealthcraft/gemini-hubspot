@@ -49,7 +49,11 @@ hubspot_updates/
 
 ### Quick Start
 ```bash
-python run_data_update.py
+# Process facilities and companies (orgs)
+python process_orgs.py
+
+# Process contacts
+python process_contacts.py
 ```
 
 ### Advanced Usage

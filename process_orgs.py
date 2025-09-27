@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Process Definitive Healthcare data using only MasterORG.csv
-This script extracts both facilities and companies from the master file
+This script extracts both facilities and companies (orgs) from the master file
 """
 
 import pandas as pd
@@ -261,9 +261,9 @@ def match_record_ids(facilities_df, companies_df):
     return facilities_df, companies_df
 
 def main():
-    """Main processing pipeline using only MasterORG.csv"""
+    """Main processing pipeline for facilities and companies (orgs) using MasterORG.csv"""
     print("=" * 60)
-    print("MASTERORG-ONLY DATA PROCESSING PIPELINE")
+    print("FACILITIES & COMPANIES (ORGS) PROCESSING PIPELINE")
     print("=" * 60)
     
     # Create output directories
@@ -292,10 +292,11 @@ def main():
             
             # Generate summary
             print("\n" + "=" * 60)
-            print("PROCESSING SUMMARY")
+            print("ORGS PROCESSING SUMMARY")
             print("=" * 60)
             print(f"Total Facilities: {len(facilities_df)}")
             print(f"Total Companies: {len(companies_df)}")
+            print(f"Total Organizations: {len(facilities_df) + len(companies_df)}")
             print("\nFiles ready for HubSpot import!")
         else:
             log_step("Processing incomplete", "No facilities or companies found")
