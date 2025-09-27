@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Process Definitive Healthcare data using only MasterORG.csv
-This script extracts both facilities and companies (orgs) from the master file
+Complete data processing pipeline:
+1. Process facilities and companies (orgs) from MasterORG.csv
+2. Process contacts from executives data (filtered by FIRM_TYPE)
+3. Match Record IDs for all data types
+4. Generate comprehensive summary
 """
 
 import pandas as pd
@@ -82,14 +85,6 @@ def load_masterorg_data():
     print("    Available columns:")
     for i, col in enumerate(master_df.columns):
         print(f"      {i+1:2d}. {col}")
-    
-    # Show sample data
-    log_step("  Sample data (first 3 rows)")
-    print(master_df.head(3).to_string())
-    
-    # Show data types
-    log_step("  Data types")
-    print(master_df.dtypes.to_string())
     
     return master_df
 
@@ -204,18 +199,70 @@ def process_companies_from_masterorg(master_df):
     
     return companies_formatted
 
-def match_record_ids(facilities_df, companies_df):
-    """Match Record IDs from HubSpot data"""
+def create_formatted_contacts():
+    """Create formatted contacts file with unique GLOBAL_PERSON_ID values, filtered by FIRM_TYPE"""
+    
+    log_step("Loading executives data")
+    executives_df = pd.read_csv('definitive/Long_Term_Care_Executives.csv', low_memory=False)
+    log_step("  Loaded executives", f"{len(executives_df)} records")
+    
+    # Define allowed firm types
+    allowed_firm_types = [
+        'Assisted Living Facility',
+        'Assisted Living Facility Corporation', 
+        'Skilled Nursing Facility',
+        'Skilled Nursing Facility Corporation'
+    ]
+    
+    # Filter by firm type
+    log_step("Filtering by FIRM_TYPE")
+    print(f"    Available firm types: {executives_df['FIRM_TYPE'].value_counts().to_dict()}")
+    
+    filtered_df = executives_df[executives_df['FIRM_TYPE'].isin(allowed_firm_types)]
+    log_step("  Filtered records", f"{len(filtered_df)} records after filtering")
+    
+    # Check for unique GLOBAL_PERSON_ID values in filtered data
+    unique_count = filtered_df['GLOBAL_PERSON_ID'].nunique()
+    total_count = len(filtered_df['GLOBAL_PERSON_ID'])
+    log_step("  Unique analysis", f"{unique_count} unique, {total_count} total, {total_count - unique_count} duplicates")
+    
+    # Create formatted contacts with unique GLOBAL_PERSON_ID
+    log_step("Creating formatted contacts")
+    contacts_formatted = filtered_df.groupby('GLOBAL_PERSON_ID').first().reset_index()
+    
+    # Map to HubSpot format
+    formatted_contacts = pd.DataFrame({
+        'First Name': contacts_formatted['FIRST_NAME'],
+        'Last Name': contacts_formatted['LAST_NAME'], 
+        'DHC ID': contacts_formatted['GLOBAL_PERSON_ID'],
+        'Job Title': contacts_formatted['TITLE'],
+        'Email': contacts_formatted['EMAIL']
+    })
+    
+    log_step("  Formatted contacts", f"{len(formatted_contacts)} unique contacts")
+    
+    # Show data quality stats
+    log_step("  Data quality", f"First Name: {formatted_contacts['First Name'].notna().sum()}, Last Name: {formatted_contacts['Last Name'].notna().sum()}, Email: {formatted_contacts['Email'].notna().sum()}, Job Title: {formatted_contacts['Job Title'].notna().sum()}")
+    
+    return formatted_contacts
+
+def match_record_ids(facilities_df, companies_df, contacts_df):
+    """Match Record IDs from HubSpot data for all data types"""
     log_step("Matching Record IDs")
     
     # Load HubSpot data
     hubspot_facilities = pd.read_csv("gemini/facilities.csv", low_memory=False)
     hubspot_companies = pd.read_csv("gemini/companies.csv", low_memory=False)
+    hubspot_contacts = pd.read_csv("gemini/contacts.csv", low_memory=False)
     
-    log_step("  Loaded HubSpot data", f"{len(hubspot_facilities)} facilities, {len(hubspot_companies)} companies")
+    log_step("  Loaded HubSpot data", f"{len(hubspot_facilities)} facilities, {len(hubspot_companies)} companies, {len(hubspot_contacts)} contacts")
+    
+    # Initialize Record ID columns
+    facilities_df['Record ID'] = ''
+    companies_df['Record ID'] = ''
+    contacts_df['Record ID'] = ''
     
     # Match facility Record IDs by CCN
-    facilities_df['Record ID'] = ''
     ccn_to_record_id = {}
     for idx, row in hubspot_facilities.iterrows():
         ccn = str(row['CCN']).strip()
@@ -231,7 +278,6 @@ def match_record_ids(facilities_df, companies_df):
             facility_matches += 1
     
     # Match company Record IDs by DHC ID
-    companies_df['Record ID'] = ''
     dhc_to_record_id = {}
     for idx, row in hubspot_companies.iterrows():
         dhc_id = str(row['DHC ID']).strip()
@@ -249,15 +295,54 @@ def match_record_ids(facilities_df, companies_df):
             companies_df.at[idx, 'Record ID'] = dhc_to_record_id[dhc_id]
             company_matches += 1
     
-    log_step("  Matched Record IDs", f"{facility_matches} facilities, {company_matches} companies")
+    # Match contact Record IDs by DHC ID and Email
+    log_step("  Matching contacts by DHC ID")
+    dhc_to_record_id_contacts = {}
+    for idx, row in hubspot_contacts.iterrows():
+        dhc_id = str(row['DHC ID']).strip()
+        record_id = str(row['Record ID']).strip()
+        if dhc_id and dhc_id != 'nan' and record_id and record_id != 'nan':
+            try:
+                dhc_to_record_id_contacts[int(float(dhc_id))] = record_id
+            except (ValueError, TypeError):
+                continue
     
-    return facilities_df, companies_df
+    contact_dhc_matches = 0
+    for idx, row in contacts_df.iterrows():
+        dhc_id = row['DHC ID']
+        if pd.notna(dhc_id) and dhc_id in dhc_to_record_id_contacts:
+            contacts_df.at[idx, 'Record ID'] = dhc_to_record_id_contacts[dhc_id]
+            contact_dhc_matches += 1
+    
+    # Match contacts by Email for unmatched records
+    log_step("  Matching contacts by Email")
+    email_to_record_id = {}
+    for idx, row in hubspot_contacts.iterrows():
+        email = str(row['Email']).strip().lower()
+        record_id = str(row['Record ID']).strip()
+        if email and email != 'nan' and email != 'none' and record_id and record_id != 'nan':
+            email_to_record_id[email] = record_id
+    
+    contact_email_matches = 0
+    for idx, row in contacts_df.iterrows():
+        # Only try email match if no DHC ID match was found
+        if not contacts_df.at[idx, 'Record ID']:
+            email = str(row['Email']).strip().lower()
+            if email and email != 'nan' and email != 'none' and email in email_to_record_id:
+                contacts_df.at[idx, 'Record ID'] = email_to_record_id[email]
+                contact_email_matches += 1
+    
+    total_contact_matches = contact_dhc_matches + contact_email_matches
+    
+    log_step("  Matched Record IDs", f"{facility_matches} facilities, {company_matches} companies, {total_contact_matches} contacts")
+    
+    return facilities_df, companies_df, contacts_df, facility_matches, company_matches, total_contact_matches
 
 def main():
-    """Main processing pipeline for facilities and companies (orgs) using MasterORG.csv"""
-    print("=" * 60)
-    print("FACILITIES & COMPANIES (ORGS) PROCESSING PIPELINE")
-    print("=" * 60)
+    """Main processing pipeline for all data types"""
+    print("=" * 80)
+    print("COMPLETE DATA PROCESSING PIPELINE")
+    print("=" * 80)
     
     # Create output directories
     os.makedirs("formatted_data", exist_ok=True)
@@ -273,26 +358,66 @@ def main():
         # Process companies from MasterORG
         companies_df = process_companies_from_masterorg(master_df)
         
-        # Match Record IDs
-        facilities_df, companies_df = match_record_ids(facilities_df, companies_df)
+        # Process contacts from executives data
+        contacts_df = create_formatted_contacts()
+        
+        # Match Record IDs for all data types
+        facilities_df, companies_df, contacts_df, facility_matches, company_matches, contact_matches = match_record_ids(
+            facilities_df, companies_df, contacts_df
+        )
         
         # Save formatted data
-        if not facilities_df.empty and not companies_df.empty:
+        if not facilities_df.empty and not companies_df.empty and not contacts_df.empty:
             log_step("Saving formatted data")
             facilities_df.to_csv("formatted_data/formatted_facilities.csv", index=False)
             companies_df.to_csv("formatted_data/formatted_companies.csv", index=False)
-            log_step("  Saved files", "formatted_data/formatted_facilities.csv, formatted_data/formatted_companies.csv")
+            contacts_df.to_csv("formatted_data/formatted_contacts.csv", index=False)
+            log_step("  Saved files", "formatted_data/formatted_facilities.csv, formatted_data/formatted_companies.csv, formatted_data/formatted_contacts.csv")
             
-            # Generate summary
-            print("\n" + "=" * 60)
-            print("ORGS PROCESSING SUMMARY")
-            print("=" * 60)
-            print(f"Total Facilities: {len(facilities_df)}")
-            print(f"Total Companies: {len(companies_df)}")
-            print(f"Total Organizations: {len(facilities_df) + len(companies_df)}")
-            print("\nFiles ready for HubSpot import!")
+            # Generate comprehensive summary
+            print("\n" + "=" * 80)
+            print("COMPLETE DATA PROCESSING SUMMARY")
+            print("=" * 80)
+            
+            # Facilities summary
+            facility_new = len(facilities_df) - facility_matches
+            print(f"FACILITIES:")
+            print(f"  Total: {len(facilities_df)}")
+            print(f"  Existing (to update): {facility_matches}")
+            print(f"  New (to create): {facility_new}")
+            
+            # Companies summary
+            company_new = len(companies_df) - company_matches
+            print(f"\nCOMPANIES:")
+            print(f"  Total: {len(companies_df)}")
+            print(f"  Existing (to update): {company_matches}")
+            print(f"  New (to create): {company_new}")
+            
+            # Contacts summary
+            contact_new = len(contacts_df) - contact_matches
+            print(f"\nCONTACTS:")
+            print(f"  Total: {len(contacts_df)}")
+            print(f"  Existing (to update): {contact_matches}")
+            print(f"  New (to create): {contact_new}")
+            
+            # Grand totals
+            total_records = len(facilities_df) + len(companies_df) + len(contacts_df)
+            total_existing = facility_matches + company_matches + contact_matches
+            total_new = facility_new + company_new + contact_new
+            
+            print(f"\nGRAND TOTALS:")
+            print(f"  Total Records: {total_records}")
+            print(f"  Existing (to update): {total_existing}")
+            print(f"  New (to create): {total_new}")
+            print(f"  Match Rate: {(total_existing/total_records*100):.1f}%")
+            
+            print(f"\nFiles ready for HubSpot import!")
+            print(f"Next steps:")
+            print(f"  1. Import new records to HubSpot")
+            print(f"  2. Export updated HubSpot data")
+            print(f"  3. Re-run this script to track progress")
         else:
-            log_step("Processing incomplete", "No facilities or companies found")
+            log_step("Processing incomplete", "No facilities, companies, or contacts found")
         
     except Exception as e:
         print(f"\nERROR: {str(e)}")
