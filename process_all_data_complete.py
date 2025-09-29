@@ -1,0 +1,1076 @@
+#!/usr/bin/env python3
+"""
+Complete data processing pipeline - combines all functionality:
+1. Process facilities and companies (orgs) from MasterORG.csv
+2. Process contacts from executives data (filtered by FIRM_TYPE)
+3. Match Record IDs for all data types
+4. Create separate import files for new vs existing records
+5. Process association changes (remove/add)
+6. Generate comprehensive summary
+"""
+
+import pandas as pd
+import os
+from datetime import datetime
+
+def log_step(step_name, details=""):
+    """Log processing steps"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {step_name}")
+    if details:
+        print(f"    {details}")
+
+def format_phone_number(phone):
+    """Format phone number as (123) 456-7890"""
+    if pd.isna(phone) or phone == '' or str(phone).strip() == '':
+        return ''
+    
+    # Remove all non-digit characters
+    digits = ''.join(filter(str.isdigit, str(phone)))
+    
+    # Format as (123) 456-7890
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[4:7]}-{digits[7:]}"
+    elif len(digits) == 11 and digits[0] == '1':
+        return f"({digits[1:4]}) {digits[4:7]}-{digits[7:]}"
+    else:
+        return str(phone).strip()
+
+def format_zip_code(zip_code):
+    """Format zip code as 5-digit string"""
+    if pd.isna(zip_code) or zip_code == '':
+        return ''
+    
+    # Convert to string and remove non-digits
+    zip_str = ''.join(filter(str.isdigit, str(zip_code)))
+    
+    # Take first 5 digits and pad with zeros if needed
+    if len(zip_str) >= 5:
+        return zip_str[:5]
+    else:
+        return zip_str.zfill(5)
+
+def format_npi(npi):
+    """Format NPI as integer (remove decimals)"""
+    if pd.isna(npi) or npi == '':
+        return ''
+    
+    try:
+        # Convert to float first to handle decimal strings, then to int
+        npi_int = int(float(str(npi)))
+        return str(npi_int)
+    except (ValueError, TypeError):
+        return ''
+
+def get_valid_us_states():
+    """Get list of valid US states (50 states + DC)"""
+    return {
+        'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
+        'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
+        'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+        'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC',
+        'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY',
+        'DC'
+    }
+
+def create_full_address(street, city, state, zip_code):
+    """Create full address string"""
+    def clean_field(field):
+        if pd.isna(field) or field == '':
+            return ''
+        return str(field).strip()
+    
+    parts = []
+    street_clean = clean_field(street)
+    city_clean = clean_field(city)
+    state_clean = clean_field(state)
+    zip_clean = clean_field(zip_code)
+    
+    if street_clean:
+        parts.append(street_clean)
+    if city_clean:
+        parts.append(city_clean)
+    if state_clean:
+        parts.append(state_clean)
+    if zip_clean:
+        parts.append(zip_clean)
+    
+    return ', '.join(parts)
+
+def load_masterorg_data():
+    """Load and inspect MasterORG.csv structure"""
+    log_step("Loading MasterORG data")
+    
+    # Load master data
+    master_df = pd.read_csv("definitive/MasterORG.csv", low_memory=False)
+    log_step("  Loaded MasterORG", f"{len(master_df)} records")
+    
+    # Show column structure
+    log_step("  Column structure", f"{len(master_df.columns)} columns")
+    print("    Available columns:")
+    for i, col in enumerate(master_df.columns):
+        print(f"      {i+1:2d}. {col}")
+    
+    return master_df
+
+def process_facilities_from_masterorg(master_df):
+    """Extract facilities from MasterORG.csv"""
+    log_step("Processing facilities from MasterORG")
+    
+    # Filter for SNF and ALF facilities using Facility subtype
+    facility_types = ['Skilled Nursing Facility', 'Assisted Living Facility']
+    facilities = master_df[
+        master_df['Facility subtype'].isin(facility_types) &
+        (master_df['Facility status'] == 'Active')
+    ].copy()
+    
+    # Apply SNF-specific filter: SNFs must have a Provider number
+    snf_facilities = facilities[facilities['Facility subtype'] == 'Skilled Nursing Facility']
+    alf_facilities = facilities[facilities['Facility subtype'] == 'Assisted Living Facility']
+    
+    # Filter SNFs to only include those with Provider number
+    snf_facilities = snf_facilities[
+        (snf_facilities['Provider number'].notna()) &
+        (snf_facilities['Provider number'] != '')
+    ]
+    
+    # Combine filtered SNFs with all ALFs
+    facilities = pd.concat([snf_facilities, alf_facilities], ignore_index=True)
+    
+    # Filter to only include US states (50 states + DC)
+    valid_states = get_valid_us_states()
+    facilities = facilities[facilities['State'].isin(valid_states)]
+    
+    log_step("  Filtered facilities", f"{len(facilities)} SNF/ALF records")
+    
+    # Map fields to HubSpot format
+    facilities_formatted = pd.DataFrame({
+        'Name of Facility': facilities['Facility name'],
+        'CCN': facilities['Provider number'].fillna(''),
+        'Facility Type': facilities['Facility subtype'].map({
+            'Skilled Nursing Facility': 'SNF',
+            'Assisted Living Facility': 'ALF'
+        }),
+        'Street': facilities['AddressLine 1'],
+        'City': facilities['City'],
+        'State': facilities['State'],
+        'Zip Code': facilities['Zip code'].apply(format_zip_code),
+        'Phone Number': facilities['Organization phone'].apply(format_phone_number),
+        'NPI': facilities['Facility primary NPI'].apply(format_npi),
+        'Facility website': facilities['Facility website'].fillna(''),
+        'Total Beds': facilities['Number of staffed beds'].fillna(''),
+        'DHC ID': facilities['Facility definitive ID']
+    })
+    
+    # Create full address columns
+    facilities_formatted["Facility's Address"] = facilities_formatted.apply(
+        lambda row: create_full_address(row['Street'], row['City'], row['State'], row['Zip Code']), 
+        axis=1
+    )
+    
+    # Add pipeline columns
+    facilities_formatted['Facility pipeline'] = 'Gemini Onboarding'
+    facilities_formatted['Facility pipeline stage'] = 'Lead'
+    
+    # Add Unique Facility Address
+    facilities_formatted['Unique Facility Address'] = facilities_formatted["Facility's Address"]
+    
+    log_step("  Formatted facilities", f"{len(facilities_formatted)} records")
+    
+    return facilities_formatted
+
+def process_companies_from_masterorg(master_df):
+    """Extract companies from MasterORG.csv"""
+    log_step("Processing companies from MasterORG")
+    
+    # First, get all Network IDs from SNF/ALF facilities
+    facility_types = ['Skilled Nursing Facility', 'Assisted Living Facility']
+    facilities = master_df[
+        master_df['Facility subtype'].isin(facility_types) &
+        (master_df['Facility status'] == 'Active')
+    ]
+    
+    # Get unique Network IDs (excluding NaN)
+    network_ids = set(facilities['Network ID'].dropna().astype(int))
+    log_step("  Found network IDs", f"{len(network_ids)} unique IDs")
+    
+    # Find companies (records whose Facility definitive ID is a Network ID for facilities)
+    companies = master_df[
+        master_df['Facility definitive ID'].astype(int).isin(network_ids)
+    ].copy()
+    
+    # Filter to only include US states (50 states + DC)
+    valid_states = get_valid_us_states()
+    companies = companies[companies['State'].isin(valid_states)]
+    
+    log_step("  Filtered companies", f"{len(companies)} records")
+    
+    # Map fields to HubSpot format
+    companies_formatted = pd.DataFrame({
+        'Company name': companies['Facility name'],
+        'DHC ID': companies['Facility definitive ID'],
+        'Street Address': companies['AddressLine 1'].fillna('') + ' ' + companies['AddressLine 2'].fillna(''),
+        'City': companies['City'],
+        'State/Region': companies['State'],
+        'Postal Code': companies['Zip code'].apply(format_zip_code),
+        'Phone Number': companies['Organization phone'].apply(format_phone_number),
+        'Website URL': companies['Facility website'].fillna(''),
+        'Country/Region': 'United States',
+        'Lifecycle Stage': 'Lead'
+    })
+    
+    # Create HQ Unique Address
+    companies_formatted['HQ Unique Address'] = companies_formatted.apply(
+        lambda row: create_full_address(row['Street Address'], row['City'], row['State/Region'], row['Postal Code']), 
+        axis=1
+    )
+    
+    # Clean up Street Address (remove extra spaces)
+    companies_formatted['Street Address'] = companies_formatted['Street Address'].str.strip()
+    
+    log_step("  Formatted companies", f"{len(companies_formatted)} records")
+    
+    return companies_formatted
+
+def create_formatted_contacts():
+    """Create formatted contacts file with unique GLOBAL_PERSON_ID values, filtered by FIRM_TYPE"""
+    
+    log_step("Loading executives data")
+    executives_df = pd.read_csv('definitive/Long_Term_Care_Executives.csv', low_memory=False)
+    log_step("  Loaded executives", f"{len(executives_df)} records")
+    
+    # Define allowed firm types
+    allowed_firm_types = [
+        'Assisted Living Facility',
+        'Assisted Living Facility Corporation', 
+        'Skilled Nursing Facility',
+        'Skilled Nursing Facility Corporation'
+    ]
+    
+    # Filter by firm type
+    log_step("Filtering by FIRM_TYPE")
+    print(f"    Available firm types: {executives_df['FIRM_TYPE'].value_counts().to_dict()}")
+    
+    filtered_df = executives_df[executives_df['FIRM_TYPE'].isin(allowed_firm_types)]
+    log_step("  Filtered records", f"{len(filtered_df)} records after filtering")
+    
+    # Check for unique GLOBAL_PERSON_ID values in filtered data
+    unique_count = filtered_df['GLOBAL_PERSON_ID'].nunique()
+    total_count = len(filtered_df['GLOBAL_PERSON_ID'])
+    log_step("  Unique analysis", f"{unique_count} unique, {total_count} total, {total_count - unique_count} duplicates")
+    
+    # Create formatted contacts with unique GLOBAL_PERSON_ID
+    log_step("Creating formatted contacts")
+    contacts_formatted = filtered_df.groupby('GLOBAL_PERSON_ID').first().reset_index()
+    
+    # Map to HubSpot format
+    formatted_contacts = pd.DataFrame({
+        'First Name': contacts_formatted['FIRST_NAME'],
+        'Last Name': contacts_formatted['LAST_NAME'], 
+        'DHC ID': contacts_formatted['GLOBAL_PERSON_ID'],
+        'Job Title': contacts_formatted['TITLE'],
+        'Email': contacts_formatted['EMAIL']
+    })
+    
+    log_step("  Formatted contacts", f"{len(formatted_contacts)} unique contacts")
+    
+    # Show data quality stats
+    log_step("  Data quality", f"First Name: {formatted_contacts['First Name'].notna().sum()}, Last Name: {formatted_contacts['Last Name'].notna().sum()}, Email: {formatted_contacts['Email'].notna().sum()}, Job Title: {formatted_contacts['Job Title'].notna().sum()}")
+    
+    return formatted_contacts
+
+def match_record_ids(facilities_df, companies_df, contacts_df):
+    """Match Record IDs from HubSpot data for all data types"""
+    log_step("Matching Record IDs")
+    
+    # Load HubSpot data
+    hubspot_facilities = pd.read_csv("gemini/facilities.csv", low_memory=False)
+    hubspot_companies = pd.read_csv("gemini/companies.csv", low_memory=False)
+    hubspot_contacts = pd.read_csv("gemini/contacts.csv", low_memory=False)
+    
+    log_step("  Loaded HubSpot data", f"{len(hubspot_facilities)} facilities, {len(hubspot_companies)} companies, {len(hubspot_contacts)} contacts")
+    
+    # Initialize Record ID columns
+    facilities_df['Record ID'] = ''
+    companies_df['Record ID'] = ''
+    contacts_df['Record ID'] = ''
+    
+    # Match facility Record IDs by DHC ID
+    dhc_to_record_id = {}
+    for idx, row in hubspot_facilities.iterrows():
+        dhc_id = str(row['DHC ID']).strip()
+        record_id = str(row['Record ID']).strip()
+        if dhc_id and dhc_id != 'nan' and record_id and record_id != 'nan':
+            try:
+                dhc_to_record_id[int(float(dhc_id))] = record_id
+            except (ValueError, TypeError):
+                continue
+    
+    facility_matches = 0
+    for idx, row in facilities_df.iterrows():
+        dhc_id = row['DHC ID']
+        if pd.notna(dhc_id) and dhc_id in dhc_to_record_id:
+            facilities_df.at[idx, 'Record ID'] = dhc_to_record_id[dhc_id]
+            facility_matches += 1
+    
+    # Match company Record IDs by DHC ID
+    dhc_to_record_id = {}
+    for idx, row in hubspot_companies.iterrows():
+        dhc_id = str(row['DHC ID']).strip()
+        record_id = str(row['Record ID']).strip()
+        if dhc_id and dhc_id != 'nan' and record_id and record_id != 'nan':
+            try:
+                dhc_to_record_id[int(float(dhc_id))] = record_id
+            except (ValueError, TypeError):
+                continue
+    
+    company_matches = 0
+    for idx, row in companies_df.iterrows():
+        dhc_id = int(row['DHC ID'])
+        if dhc_id in dhc_to_record_id:
+            companies_df.at[idx, 'Record ID'] = dhc_to_record_id[dhc_id]
+            company_matches += 1
+    
+    # Match contact Record IDs by DHC ID and Email
+    log_step("  Matching contacts by DHC ID")
+    dhc_to_record_id_contacts = {}
+    for idx, row in hubspot_contacts.iterrows():
+        dhc_id = str(row['DHC ID']).strip()
+        record_id = str(row['Record ID']).strip()
+        if dhc_id and dhc_id != 'nan' and record_id and record_id != 'nan':
+            try:
+                dhc_to_record_id_contacts[int(float(dhc_id))] = record_id
+            except (ValueError, TypeError):
+                continue
+    
+    contact_dhc_matches = 0
+    for idx, row in contacts_df.iterrows():
+        dhc_id = row['DHC ID']
+        if pd.notna(dhc_id) and dhc_id in dhc_to_record_id_contacts:
+            contacts_df.at[idx, 'Record ID'] = dhc_to_record_id_contacts[dhc_id]
+            contact_dhc_matches += 1
+    
+    # Match contacts by Email for unmatched records
+    log_step("  Matching contacts by Email")
+    email_to_record_id = {}
+    for idx, row in hubspot_contacts.iterrows():
+        email = str(row['Email']).strip().lower()
+        record_id = str(row['Record ID']).strip()
+        if email and email != 'nan' and email != 'none' and record_id and record_id != 'nan':
+            email_to_record_id[email] = record_id
+    
+    contact_email_matches = 0
+    for idx, row in contacts_df.iterrows():
+        # Only try email match if no DHC ID match was found
+        if not contacts_df.at[idx, 'Record ID']:
+            email = str(row['Email']).strip().lower()
+            if email and email != 'nan' and email != 'none' and email in email_to_record_id:
+                contacts_df.at[idx, 'Record ID'] = email_to_record_id[email]
+                contact_email_matches += 1
+    
+    total_contact_matches = contact_dhc_matches + contact_email_matches
+    
+    log_step("  Matched Record IDs", f"{facility_matches} facilities, {company_matches} companies, {total_contact_matches} contacts")
+    
+    return facilities_df, companies_df, contacts_df, facility_matches, company_matches, total_contact_matches
+
+def create_import_files(facilities_df, companies_df, contacts_df):
+    """Create separate import files for new records and updates"""
+    log_step("Creating import files")
+    
+    # Split facilities into new vs existing
+    log_step("  Splitting facilities")
+    facilities_new = facilities_df[facilities_df['Record ID'].isna() | (facilities_df['Record ID'] == '')].copy()
+    facilities_existing = facilities_df[facilities_df['Record ID'].notna() & (facilities_df['Record ID'] != '')].copy()
+    
+    # Remove Record ID column from new records
+    if 'Record ID' in facilities_new.columns:
+        facilities_new = facilities_new.drop('Record ID', axis=1)
+    
+    log_step("    Facilities split", f"New: {len(facilities_new)}, Existing: {len(facilities_existing)}")
+    
+    # Split companies into new vs existing
+    log_step("  Splitting companies")
+    companies_new = companies_df[companies_df['Record ID'].isna() | (companies_df['Record ID'] == '')].copy()
+    companies_existing = companies_df[companies_df['Record ID'].notna() & (companies_df['Record ID'] != '')].copy()
+    
+    # Remove Record ID column from new records
+    if 'Record ID' in companies_new.columns:
+        companies_new = companies_new.drop('Record ID', axis=1)
+    
+    log_step("    Companies split", f"New: {len(companies_new)}, Existing: {len(companies_existing)}")
+    
+    # Split contacts into new vs existing
+    log_step("  Splitting contacts")
+    contacts_new = contacts_df[contacts_df['Record ID'].isna() | (contacts_df['Record ID'] == '')].copy()
+    contacts_existing = contacts_df[contacts_df['Record ID'].notna() & (contacts_df['Record ID'] != '')].copy()
+    
+    # Remove Record ID column from new records
+    if 'Record ID' in contacts_new.columns:
+        contacts_new = contacts_new.drop('Record ID', axis=1)
+    
+    log_step("    Contacts split", f"New: {len(contacts_new)}, Existing: {len(contacts_existing)}")
+    
+    # Save new record files (Step 1)
+    log_step("  Saving Step 1: New record files")
+    if not facilities_new.empty:
+        facilities_new.to_csv("hubspot_import/step1_new_records/facilities_new.csv", index=False)
+        log_step("    Saved", "hubspot_import/step1_new_records/facilities_new.csv")
+    
+    if not companies_new.empty:
+        companies_new.to_csv("hubspot_import/step1_new_records/companies_new.csv", index=False)
+        log_step("    Saved", "hubspot_import/step1_new_records/companies_new.csv")
+    
+    if not contacts_new.empty:
+        contacts_new.to_csv("hubspot_import/step1_new_records/contacts_new.csv", index=False)
+        log_step("    Saved", "hubspot_import/step1_new_records/contacts_new.csv")
+    
+    # Save update files (Step 2)
+    log_step("  Saving Step 2: Update files")
+    if not facilities_existing.empty:
+        facilities_existing.to_csv("hubspot_import/step2_updates/facilities_updates.csv", index=False)
+        log_step("    Saved", "hubspot_import/step2_updates/facilities_updates.csv")
+    
+    if not companies_existing.empty:
+        companies_existing.to_csv("hubspot_import/step2_updates/companies_updates.csv", index=False)
+        log_step("    Saved", "hubspot_import/step2_updates/companies_updates.csv")
+    
+    if not contacts_existing.empty:
+        contacts_existing.to_csv("hubspot_import/step2_updates/contacts_updates.csv", index=False)
+        log_step("    Saved", "hubspot_import/step2_updates/contacts_updates.csv")
+    
+    return {
+        'facilities_new': len(facilities_new),
+        'facilities_existing': len(facilities_existing),
+        'companies_new': len(companies_new),
+        'companies_existing': len(companies_existing),
+        'contacts_new': len(contacts_new),
+        'contacts_existing': len(contacts_existing)
+    }
+
+def process_associations():
+    """Process facility-company associations from MasterORG data"""
+    log_step("Processing associations")
+    
+    # Load MasterORG data
+    master_df = pd.read_csv("definitive/MasterORG.csv", low_memory=False)
+    
+    # Filter for SNF and ALF facilities
+    facility_types = ['Skilled Nursing Facility', 'Assisted Living Facility']
+    facilities = master_df[
+        master_df['Facility subtype'].isin(facility_types) &
+        (master_df['Facility status'] == 'Active')
+    ].copy()
+    
+    # Apply SNF-specific filter
+    snf_facilities = facilities[facilities['Facility subtype'] == 'Skilled Nursing Facility']
+    alf_facilities = facilities[facilities['Facility subtype'] == 'Assisted Living Facility']
+    
+    snf_facilities = snf_facilities[
+        (snf_facilities['Provider number'].notna()) &
+        (snf_facilities['Provider number'] != '')
+    ]
+    
+    facilities = pd.concat([snf_facilities, alf_facilities], ignore_index=True)
+    
+    # Get companies
+    network_ids = set(facilities['Network ID'].dropna().astype(int))
+    companies = master_df[master_df['Facility definitive ID'].astype(int).isin(network_ids)].copy()
+    
+    # Create facility-company associations using merge
+    facility_company_associations = facilities.merge(
+        companies[['Facility definitive ID', 'Facility name']], 
+        left_on='Network ID', 
+        right_on='Facility definitive ID', 
+        how='inner',
+        suffixes=('_facility', '_company')
+    )
+    
+    # Format the associations
+    associations_df = pd.DataFrame({
+        'Facility DHC ID': facility_company_associations['Facility definitive ID_facility'],
+        'Facility Name': facility_company_associations['Facility name_facility'],
+        'Company DHC ID': facility_company_associations['Facility definitive ID_company'],
+        'Company Name': facility_company_associations['Facility name_company'],
+        'Network Name': facility_company_associations['Network'].fillna(''),
+        'Association Type': 'Facility-Company'
+    })
+    
+    log_step("  Created facility-company associations", f"{len(associations_df)} associations")
+    
+    return associations_df
+
+def process_contact_associations():
+    """Process contact-facility and contact-company associations"""
+    log_step("Processing contact associations")
+    
+    # Load executives data
+    executives_df = pd.read_csv('definitive/Long_Term_Care_Executives.csv', low_memory=False)
+    
+    # Filter by firm type
+    allowed_firm_types = [
+        'Assisted Living Facility',
+        'Assisted Living Facility Corporation', 
+        'Skilled Nursing Facility',
+        'Skilled Nursing Facility Corporation'
+    ]
+    
+    filtered_df = executives_df[executives_df['FIRM_TYPE'].isin(allowed_firm_types)]
+    
+    # Filter contacts to only include those associated with facilities in valid US states
+    valid_states = get_valid_us_states()
+    
+    # Load MasterORG to get facility states
+    master_df = pd.read_csv("definitive/MasterORG.csv", low_memory=False)
+    
+    # Get facilities in valid US states
+    us_facilities = master_df[master_df['State'].isin(valid_states)]
+    us_facility_ids = set(us_facilities['Facility definitive ID'].astype(int))
+    
+    # Filter contacts to only include those associated with US facilities
+    filtered_df = filtered_df[filtered_df['HOSPITAL_ID'].astype(int).isin(us_facility_ids)]
+    
+    # Create contact-facility associations
+    contact_facility_associations = pd.DataFrame({
+        'Contact DHC ID': filtered_df['GLOBAL_PERSON_ID'],
+        'Contact Name': filtered_df['FIRST_NAME'] + ' ' + filtered_df['LAST_NAME'],
+        'Facility DHC ID': filtered_df['HOSPITAL_ID'],
+        'Facility Name': filtered_df['HOSPITAL_NAME'],
+        'Contact Title': filtered_df['TITLE'],
+        'Association Type': 'Contact-Facility'
+    })
+    
+    log_step("  Created contact-facility associations", f"{len(contact_facility_associations)} associations")
+    
+    # Create contact-company associations via facility networks
+    master_df = pd.read_csv("definitive/MasterORG.csv", low_memory=False)
+    
+    # Get facility-company mapping
+    facility_types = ['Skilled Nursing Facility', 'Assisted Living Facility']
+    facilities = master_df[
+        master_df['Facility subtype'].isin(facility_types) &
+        (master_df['Facility status'] == 'Active')
+    ].copy()
+    
+    # Apply SNF-specific filter
+    snf_facilities = facilities[facilities['Facility subtype'] == 'Skilled Nursing Facility']
+    alf_facilities = facilities[facilities['Facility subtype'] == 'Assisted Living Facility']
+    
+    snf_facilities = snf_facilities[
+        (snf_facilities['Provider number'].notna()) &
+        (snf_facilities['Provider number'] != '')
+    ]
+    
+    facilities = pd.concat([snf_facilities, alf_facilities], ignore_index=True)
+    
+    # Get companies
+    network_ids = set(facilities['Network ID'].dropna().astype(int))
+    companies = master_df[master_df['Facility definitive ID'].astype(int).isin(network_ids)].copy()
+    
+    # Create facility-company mapping
+    facility_company_map = facilities[['Facility definitive ID', 'Network ID']].merge(
+        companies[['Facility definitive ID', 'Facility name']], 
+        left_on='Network ID', 
+        right_on='Facility definitive ID', 
+        how='inner'
+    )
+    
+    # Join contacts with facility-company mapping
+    contact_company_associations = filtered_df.merge(
+        facility_company_map,
+        left_on='HOSPITAL_ID',
+        right_on='Facility definitive ID_x',
+        how='inner'
+    )
+    
+    # Format the associations
+    contact_company_associations_df = pd.DataFrame({
+        'Contact DHC ID': contact_company_associations['GLOBAL_PERSON_ID'],
+        'Contact Name': contact_company_associations['FIRST_NAME'] + ' ' + contact_company_associations['LAST_NAME'],
+        'Company DHC ID': contact_company_associations['Facility definitive ID_y'],
+        'Company Name': contact_company_associations['Facility name'],
+        'Contact Title': contact_company_associations['TITLE'],
+        'Association Type': 'Contact-Company'
+    })
+    
+    log_step("  Created contact-company associations", f"{len(contact_company_associations_df)} associations")
+    
+    return contact_facility_associations, contact_company_associations_df
+
+def match_associations_with_record_ids(facility_company_df, contact_facility_df, contact_company_df):
+    """Match associations with HubSpot Record IDs"""
+    log_step("Matching associations with Record IDs")
+    
+    # Load HubSpot data
+    hubspot_facilities = pd.read_csv("gemini/facilities.csv", low_memory=False)
+    hubspot_companies = pd.read_csv("gemini/companies.csv", low_memory=False)
+    hubspot_contacts = pd.read_csv("gemini/contacts.csv", low_memory=False)
+    
+    # Create lookup dictionaries efficiently (handle NaN values)
+    facility_dhc_to_record = {}
+    for idx, row in hubspot_facilities.iterrows():
+        dhc_id = str(row['DHC ID']).strip()
+        record_id = str(row['Record ID']).strip()
+        if dhc_id and dhc_id != 'nan' and record_id and record_id != 'nan':
+            try:
+                facility_dhc_to_record[int(float(dhc_id))] = record_id
+            except (ValueError, TypeError):
+                continue
+    
+    company_dhc_to_record = {}
+    for idx, row in hubspot_companies.iterrows():
+        dhc_id = str(row['DHC ID']).strip()
+        record_id = str(row['Record ID']).strip()
+        if dhc_id and dhc_id != 'nan' and record_id and record_id != 'nan':
+            try:
+                company_dhc_to_record[int(float(dhc_id))] = record_id
+            except (ValueError, TypeError):
+                continue
+    
+    contact_dhc_to_record = {}
+    for idx, row in hubspot_contacts.iterrows():
+        dhc_id = str(row['DHC ID']).strip()
+        record_id = str(row['Record ID']).strip()
+        if dhc_id and dhc_id != 'nan' and record_id and record_id != 'nan':
+            try:
+                contact_dhc_to_record[int(float(dhc_id))] = record_id
+            except (ValueError, TypeError):
+                continue
+    
+    # Add Record IDs using vectorized operations
+    facility_company_df['Facility Record ID'] = facility_company_df['Facility DHC ID'].map(facility_dhc_to_record).fillna('')
+    facility_company_df['Company Record ID'] = facility_company_df['Company DHC ID'].map(company_dhc_to_record).fillna('')
+    
+    contact_facility_df['Contact Record ID'] = contact_facility_df['Contact DHC ID'].map(contact_dhc_to_record).fillna('')
+    contact_facility_df['Facility Record ID'] = contact_facility_df['Facility DHC ID'].map(facility_dhc_to_record).fillna('')
+    
+    contact_company_df['Contact Record ID'] = contact_company_df['Contact DHC ID'].map(contact_dhc_to_record).fillna('')
+    contact_company_df['Company Record ID'] = contact_company_df['Company DHC ID'].map(company_dhc_to_record).fillna('')
+    
+    # Count matches
+    facility_company_matches = len(facility_company_df[
+        (facility_company_df['Facility Record ID'] != '') & 
+        (facility_company_df['Company Record ID'] != '')
+    ])
+    
+    contact_facility_matches = len(contact_facility_df[
+        (contact_facility_df['Contact Record ID'] != '') & 
+        (contact_facility_df['Facility Record ID'] != '')
+    ])
+    
+    contact_company_matches = len(contact_company_df[
+        (contact_company_df['Contact Record ID'] != '') & 
+        (contact_company_df['Company Record ID'] != '')
+    ])
+    
+    log_step("  Matched associations", f"Facility-Company: {facility_company_matches}, Contact-Facility: {contact_facility_matches}, Contact-Company: {contact_company_matches}")
+    
+    return facility_company_df, contact_facility_df, contact_company_df
+
+def process_association_changes(facility_company_df, contact_facility_df, contact_company_df):
+    """Process associations into add/remove files"""
+    log_step("Processing association changes")
+    
+    # Load current HubSpot associations
+    try:
+        hubspot_facilities = pd.read_csv("gemini/facilities.csv", low_memory=False)
+        hubspot_contacts = pd.read_csv("gemini/contacts.csv", low_memory=False)
+    except FileNotFoundError:
+        log_step("  No existing HubSpot data found, creating add-only files")
+        return save_association_files(facility_company_df, contact_facility_df, contact_company_df)
+    
+    # Process each association type
+    association_changes = {}
+    
+    # Facility-Company associations
+    if not facility_company_df.empty:
+        facility_company_changes = process_facility_company_changes(facility_company_df, hubspot_facilities)
+        association_changes['facility_company'] = facility_company_changes
+    
+    # Contact-Facility associations  
+    if not contact_facility_df.empty:
+        contact_facility_changes = process_contact_facility_changes(contact_facility_df, hubspot_contacts)
+        association_changes['contact_facility'] = contact_facility_changes
+    
+    # Contact-Company associations
+    if not contact_company_df.empty:
+        contact_company_changes = process_contact_company_changes(contact_company_df, hubspot_contacts)
+        association_changes['contact_company'] = contact_company_changes
+    
+    # Save the processed files
+    save_processed_associations(association_changes)
+    
+    return {
+        'facility_company': len(facility_company_df),
+        'contact_facility': len(contact_facility_df),
+        'contact_company': len(contact_company_df)
+    }
+
+def process_facility_company_changes(facility_company_df, hubspot_facilities):
+    """Process facility-company association changes"""
+    # Filter to only include associations with Record IDs (existing records)
+    facility_company_existing = facility_company_df[
+        (facility_company_df['Facility Record ID'] != '') &
+        (facility_company_df['Company Record ID'] != '') &
+        (facility_company_df['Facility Record ID'].notna()) &
+        (facility_company_df['Company Record ID'].notna())
+    ].copy()
+    
+    # Get all associations (including those without Record IDs yet)
+    facility_company_all = facility_company_df.copy()
+    
+    if facility_company_all.empty:
+        return {'add': pd.DataFrame(), 'remove': pd.DataFrame()}
+    
+    # Get current associations from HubSpot
+    current_associations = []
+    for idx, row in hubspot_facilities.iterrows():
+        if pd.notna(row['Associated Company IDs']) and str(row['Associated Company IDs']).strip() != '':
+            facility_id = int(row['Record ID'])
+            company_ids = str(row['Associated Company IDs']).split(';')
+            for company_id in company_ids:
+                if company_id.strip():
+                    current_associations.append({
+                        'Record ID': facility_id,
+                        'Association ID': int(float(company_id.strip())),
+                        'Association Type': 'Facility-Company'
+                    })
+    
+    current_df = pd.DataFrame(current_associations)
+    
+    # Create add and remove dataframes
+    add_df = pd.DataFrame(columns=['Record ID', 'Association ID', 'Association Type'])
+    remove_df = pd.DataFrame(columns=['Record ID', 'Association ID', 'Association Type'])
+    
+    # If we have existing associations with Record IDs, process them
+    if not facility_company_existing.empty:
+        # Format for comparison (convert to integers)
+        facility_company_existing_formatted = pd.DataFrame({
+            'Record ID': facility_company_existing['Facility Record ID'].astype(int),
+            'Association ID': facility_company_existing['Company Record ID'].astype(int),
+            'Association Type': 'Facility-Company'
+        })
+        
+        # Find associations to remove and add
+        if not current_df.empty:
+            # Find associations to remove (in current but not in new)
+            remove_df = current_df.merge(facility_company_existing_formatted, on=['Record ID', 'Association ID'], how='left', indicator=True)
+            remove_df = remove_df[remove_df['_merge'] == 'left_only'][['Record ID', 'Association ID', 'Association Type_x']].rename(columns={'Association Type_x': 'Association Type'})
+            
+            # Find associations to add (in new but not in current)
+            add_df = facility_company_existing_formatted.merge(current_df, on=['Record ID', 'Association ID'], how='left', indicator=True)
+            add_df = add_df[add_df['_merge'] == 'left_only'][['Record ID', 'Association ID', 'Association Type_x']].rename(columns={'Association Type_x': 'Association Type'})
+        else:
+            add_df = facility_company_existing_formatted
+    
+    # If we have associations without Record IDs yet, create placeholder add files
+    # These will be processed after the records are imported
+    if facility_company_existing.empty and not facility_company_all.empty:
+        # Create a placeholder add file with all associations
+        add_df = pd.DataFrame({
+            'Record ID': ['TBD'] * len(facility_company_all),
+            'Association ID': ['TBD'] * len(facility_company_all),
+            'Association Type': ['Facility-Company'] * len(facility_company_all)
+        })
+    
+    return {'add': add_df, 'remove': remove_df}
+
+def process_contact_facility_changes(contact_facility_df, hubspot_contacts):
+    """Process contact-facility association changes"""
+    # Filter to only include associations with Record IDs (existing records)
+    contact_facility_existing = contact_facility_df[
+        (contact_facility_df['Contact Record ID'] != '') &
+        (contact_facility_df['Facility Record ID'] != '') &
+        (contact_facility_df['Contact Record ID'].notna()) &
+        (contact_facility_df['Facility Record ID'].notna())
+    ].copy()
+    
+    # Get all associations (including those without Record IDs yet)
+    contact_facility_all = contact_facility_df.copy()
+    
+    if contact_facility_all.empty:
+        return {'add': pd.DataFrame(), 'remove': pd.DataFrame()}
+    
+    # Get current associations from HubSpot
+    current_associations = []
+    for idx, row in hubspot_contacts.iterrows():
+        if pd.notna(row['Associated Facility IDs']) and str(row['Associated Facility IDs']).strip() != '':
+            contact_id = int(row['Record ID'])
+            facility_ids = str(row['Associated Facility IDs']).split(';')
+            for facility_id in facility_ids:
+                if facility_id.strip():
+                    current_associations.append({
+                        'Record ID': contact_id,
+                        'Association ID': int(float(facility_id.strip())),
+                        'Association Type': 'Contact-Facility'
+                    })
+    
+    current_df = pd.DataFrame(current_associations)
+    
+    # Create add and remove dataframes
+    add_df = pd.DataFrame(columns=['Record ID', 'Association ID', 'Association Type'])
+    remove_df = pd.DataFrame(columns=['Record ID', 'Association ID', 'Association Type'])
+    
+    # If we have existing associations with Record IDs, process them
+    if not contact_facility_existing.empty:
+        # Format for comparison (convert to integers)
+        contact_facility_existing_formatted = pd.DataFrame({
+            'Record ID': contact_facility_existing['Contact Record ID'].astype(int),
+            'Association ID': contact_facility_existing['Facility Record ID'].astype(int),
+            'Association Type': 'Contact-Facility'
+        })
+        
+        # Find associations to remove and add
+        if not current_df.empty:
+            # Find associations to remove (in current but not in new)
+            remove_df = current_df.merge(contact_facility_existing_formatted, on=['Record ID', 'Association ID'], how='left', indicator=True)
+            remove_df = remove_df[remove_df['_merge'] == 'left_only'][['Record ID', 'Association ID', 'Association Type_x']].rename(columns={'Association Type_x': 'Association Type'})
+            
+            # Find associations to add (in new but not in current)
+            add_df = contact_facility_existing_formatted.merge(current_df, on=['Record ID', 'Association ID'], how='left', indicator=True)
+            add_df = add_df[add_df['_merge'] == 'left_only'][['Record ID', 'Association ID', 'Association Type_x']].rename(columns={'Association Type_x': 'Association Type'})
+        else:
+            add_df = contact_facility_existing_formatted
+    
+    # If we have associations without Record IDs yet, create placeholder add files
+    # These will be processed after the records are imported
+    if contact_facility_existing.empty and not contact_facility_all.empty:
+        # Create a placeholder add file with all associations
+        add_df = pd.DataFrame({
+            'Record ID': ['TBD'] * len(contact_facility_all),
+            'Association ID': ['TBD'] * len(contact_facility_all),
+            'Association Type': ['Contact-Facility'] * len(contact_facility_all)
+        })
+    
+    return {'add': add_df, 'remove': remove_df}
+
+def process_contact_company_changes(contact_company_df, hubspot_contacts):
+    """Process contact-company association changes"""
+    # Filter to only include associations with Record IDs (existing records)
+    contact_company_new = contact_company_df[
+        (contact_company_df['Contact Record ID'] != '') &
+        (contact_company_df['Company Record ID'] != '') &
+        (contact_company_df['Contact Record ID'].notna()) &
+        (contact_company_df['Company Record ID'].notna())
+    ].copy()
+    
+    if contact_company_new.empty:
+        return {'add': pd.DataFrame(), 'remove': pd.DataFrame()}
+    
+    # Format for comparison (convert to integers)
+    contact_company_new_formatted = pd.DataFrame({
+        'Record ID': contact_company_new['Contact Record ID'].astype(int),
+        'Association ID': contact_company_new['Company Record ID'].astype(int),
+        'Association Type': 'Contact-Company'
+    })
+    
+    # Get current associations from HubSpot
+    current_associations = []
+    for idx, row in hubspot_contacts.iterrows():
+        if pd.notna(row['Associated Company IDs']) and str(row['Associated Company IDs']).strip() != '':
+            contact_id = int(row['Record ID'])
+            company_ids = str(row['Associated Company IDs']).split(';')
+            for company_id in company_ids:
+                if company_id.strip():
+                    current_associations.append({
+                        'Record ID': contact_id,
+                        'Association ID': int(float(company_id.strip())),
+                        'Association Type': 'Contact-Company'
+                    })
+    
+    current_df = pd.DataFrame(current_associations)
+    
+    # Find associations to remove and add
+    if not current_df.empty:
+        # Find associations to remove (in current but not in new)
+        remove_df = current_df.merge(contact_company_new_formatted, on=['Record ID', 'Association ID'], how='left', indicator=True)
+        remove_df = remove_df[remove_df['_merge'] == 'left_only'][['Record ID', 'Association ID', 'Association Type_x']].rename(columns={'Association Type_x': 'Association Type'})
+    else:
+        remove_df = pd.DataFrame(columns=['Record ID', 'Association ID', 'Association Type'])
+    
+    # Find associations to add (in new but not in current)
+    if not current_df.empty:
+        add_df = contact_company_new_formatted.merge(current_df, on=['Record ID', 'Association ID'], how='left', indicator=True)
+        add_df = add_df[add_df['_merge'] == 'left_only'][['Record ID', 'Association ID', 'Association Type_x']].rename(columns={'Association Type_x': 'Association Type'})
+    else:
+        add_df = contact_company_new_formatted
+    
+    return {'add': add_df, 'remove': remove_df}
+
+def save_processed_associations(association_changes):
+    """Save processed association files to add/remove folders"""
+    log_step("Saving processed association files")
+    
+    for assoc_type, changes in association_changes.items():
+        add_df = changes['add']
+        remove_df = changes['remove']
+        
+        # Save add files
+        if not add_df.empty:
+            add_df.to_csv(f"hubspot_import/step3_associations/add/{assoc_type}_add.csv", index=False)
+            log_step(f"  Saved {assoc_type} add", f"{len(add_df)} associations")
+        
+        # Save remove files
+        if not remove_df.empty:
+            remove_df.to_csv(f"hubspot_import/step3_associations/remove/{assoc_type}_remove.csv", index=False)
+            log_step(f"  Saved {assoc_type} remove", f"{len(remove_df)} associations")
+    
+    log_step("  Saved files", "hubspot_import/step3_associations/add/ and remove/")
+
+def save_association_files(facility_company_df, contact_facility_df, contact_company_df):
+    """Save association files (fallback when no existing data)"""
+    log_step("Saving Step 3: Association files")
+    
+    # Save association files
+    facility_company_df.to_csv("hubspot_import/step3_associations/facility_company_associations.csv", index=False)
+    contact_facility_df.to_csv("hubspot_import/step3_associations/contact_facility_associations.csv", index=False)
+    contact_company_df.to_csv("hubspot_import/step3_associations/contact_company_associations.csv", index=False)
+    
+    log_step("  Saved files", "hubspot_import/step3_associations/*.csv")
+    
+    return {
+        'facility_company': len(facility_company_df),
+        'contact_facility': len(contact_facility_df),
+        'contact_company': len(contact_company_df)
+    }
+
+def main():
+    """Main processing pipeline for all data types"""
+    print("=" * 80)
+    print("COMPLETE DATA PROCESSING PIPELINE")
+    print("=" * 80)
+    
+    # Create organized output directories
+    os.makedirs("hubspot_import", exist_ok=True)
+    os.makedirs("hubspot_import/step1_new_records", exist_ok=True)
+    os.makedirs("hubspot_import/step2_updates", exist_ok=True)
+    os.makedirs("hubspot_import/step3_associations", exist_ok=True)
+    os.makedirs("hubspot_import/step3_associations/remove", exist_ok=True)
+    os.makedirs("hubspot_import/step3_associations/add", exist_ok=True)
+    os.makedirs("hubspot_import/raw_data", exist_ok=True)
+    
+    try:
+        # Load MasterORG data
+        master_df = load_masterorg_data()
+        
+        # Process facilities from MasterORG
+        facilities_df = process_facilities_from_masterorg(master_df)
+        
+        # Process companies from MasterORG
+        companies_df = process_companies_from_masterorg(master_df)
+        
+        # Process contacts from executives data
+        contacts_df = create_formatted_contacts()
+        
+        # Match Record IDs for all data types
+        facilities_df, companies_df, contacts_df, facility_matches, company_matches, contact_matches = match_record_ids(
+            facilities_df, companies_df, contacts_df
+        )
+        
+        # Save raw formatted data
+        log_step("Saving raw formatted data")
+        facilities_df.to_csv("hubspot_import/raw_data/formatted_facilities.csv", index=False)
+        companies_df.to_csv("hubspot_import/raw_data/formatted_companies.csv", index=False)
+        contacts_df.to_csv("hubspot_import/raw_data/formatted_contacts.csv", index=False)
+        log_step("  Saved files", "hubspot_import/raw_data/formatted_*.csv")
+        
+        # Create import files
+        import_results = create_import_files(facilities_df, companies_df, contacts_df)
+        
+        # Process associations
+        facility_company_df = process_associations()
+        contact_facility_df, contact_company_df = process_contact_associations()
+        
+        # Match associations with Record IDs
+        facility_company_df, contact_facility_df, contact_company_df = match_associations_with_record_ids(
+            facility_company_df, contact_facility_df, contact_company_df
+        )
+        
+        # Save association files
+        association_counts = process_association_changes(
+            facility_company_df, contact_facility_df, contact_company_df
+        )
+        facility_company_count = association_counts['facility_company']
+        contact_facility_count = association_counts['contact_facility']
+        contact_company_count = association_counts['contact_company']
+        
+        # Generate comprehensive summary
+        print("\n" + "=" * 80)
+        print("COMPLETE DATA PROCESSING SUMMARY")
+        print("=" * 80)
+        
+        # Facilities summary
+        facility_new = import_results['facilities_new']
+        facility_existing = import_results['facilities_existing']
+        print(f"FACILITIES:")
+        print(f"  Total: {facility_new + facility_existing}")
+        print(f"  Existing (to update): {facility_existing}")
+        print(f"  New (to create): {facility_new}")
+        
+        # Companies summary
+        company_new = import_results['companies_new']
+        company_existing = import_results['companies_existing']
+        print(f"\nCOMPANIES:")
+        print(f"  Total: {company_new + company_existing}")
+        print(f"  Existing (to update): {company_existing}")
+        print(f"  New (to create): {company_new}")
+        
+        # Contacts summary
+        contact_new = import_results['contacts_new']
+        contact_existing = import_results['contacts_existing']
+        print(f"\nCONTACTS:")
+        print(f"  Total: {contact_new + contact_existing}")
+        print(f"  Existing (to update): {contact_existing}")
+        print(f"  New (to create): {contact_new}")
+        
+        # Associations summary
+        print(f"\nASSOCIATIONS:")
+        print(f"  Facility-Company: {facility_company_count}")
+        print(f"  Contact-Facility: {contact_facility_count}")
+        print(f"  Contact-Company: {contact_company_count}")
+        print(f"  Total associations: {facility_company_count + contact_facility_count + contact_company_count}")
+        
+        # Grand totals
+        total_records = facility_new + facility_existing + company_new + company_existing + contact_new + contact_existing
+        total_existing = facility_existing + company_existing + contact_existing
+        total_new = facility_new + company_new + contact_new
+        
+        print(f"\nGRAND TOTALS:")
+        print(f"  Total Records: {total_records}")
+        print(f"  Existing (to update): {total_existing}")
+        print(f"  New (to create): {total_new}")
+        print(f"  Match Rate: {(total_existing/total_records*100):.1f}%")
+        
+        print(f"\n" + "=" * 80)
+        print("HUBSPOT IMPORT WORKFLOW")
+        print("=" * 80)
+        print(f"All files organized in: hubspot_import/")
+        print(f"")
+        print(f"STEP 1: Import New Records")
+        print(f"   Files: hubspot_import/step1_new_records/")
+        print(f"   Order: Companies -> Facilities -> Contacts")
+        print(f"   Records: {company_new} companies, {facility_new} facilities, {contact_new} contacts")
+        print(f"")
+        print(f"STEP 2: Update Existing Records")
+        print(f"   Files: hubspot_import/step2_updates/")
+        print(f"   Order: Companies -> Facilities -> Contacts")
+        print(f"   Records: {company_existing} companies, {facility_existing} facilities, {contact_existing} contacts")
+        print(f"")
+        print(f"STEP 3: Handle Associations")
+        print(f"   Files: hubspot_import/step3_associations/")
+        print(f"   Process: Remove old associations -> Add new associations")
+        print(f"   Associations: {facility_company_count + contact_facility_count + contact_company_count} total")
+        print(f"")
+        print(f"NEXT STEPS:")
+        print(f"   1. Import Step 1 files to HubSpot")
+        print(f"   2. Export updated HubSpot data")
+        print(f"   3. Re-run this script to track progress")
+        print(f"   4. Import Step 2 files to HubSpot")
+        print(f"   5. Import Step 3 associations to HubSpot")
+        
+    except Exception as e:
+        print(f"\nERROR: {str(e)}")
+        raise
+
+if __name__ == "__main__":
+    main()
