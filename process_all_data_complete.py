@@ -1195,7 +1195,7 @@ def main():
         print(f"  Contact-Company: {contact_company_count}")
         print(f"  Total associations: {facility_company_count + contact_facility_count + contact_company_count}")
         
-        # Grand totals
+        # Grand totals!
         total_records = facility_new + facility_existing + company_new + company_existing + contact_new + contact_existing
         total_existing = facility_existing + company_existing + contact_existing
         total_new = facility_new + company_new + contact_new
