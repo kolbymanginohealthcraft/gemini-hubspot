@@ -30,7 +30,7 @@ def format_phone_number(phone):
     
     # Format as (123) 456-7890
     if len(digits) == 10:
-        return f"({digits[:3]}) {digits[4:7]}-{digits[7:]}"
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
     elif len(digits) == 11 and digits[0] == '1':
         return f"({digits[1:4]}) {digits[4:7]}-{digits[7:]}"
     else:
@@ -215,8 +215,7 @@ def process_companies_from_masterorg(master_df):
         'Postal Code': companies['Zip code'].apply(format_zip_code),
         'Phone Number': companies['Organization phone'].apply(format_phone_number),
         'Website URL': companies['Facility website'].fillna(''),
-        'Country/Region': 'United States',
-        'Lifecycle Stage': 'Lead'
+        'Country/Region': 'United States'
     })
     
     # Create HQ Unique Address
@@ -461,12 +460,32 @@ def detect_changes_in_existing_records(existing_df, hubspot_df, object_type):
     
     # Filter to only records with changes
     if change_mask.any():
-        # Get the indices of records that need changes from the merged dataframe
-        changed_indices = merged_df.index[change_mask]
-        # Map back to original dataframe indices using the merge result
-        updated_df = existing_df.iloc[changed_indices].copy()
-        log_step(f"    {object_type} changes detected", f"{len(updated_df)} out of {len(existing_df)} records need updates")
-        return updated_df
+        # Get the records that need changes from the merged dataframe
+        changed_records = merged_df[change_mask].copy()
+        
+        # Debug: Check if 60 West is incorrectly in changed_records
+        if object_type == 'facilities':
+            sixty_west_in_changed = changed_records[changed_records['CCN_new'] == '075442']
+            if len(sixty_west_in_changed) > 0:
+                log_step(f"    WARNING: 60 West incorrectly flagged for changes", "This indicates a bug in change detection")
+        
+        # Extract only the original columns (those with _new suffix or without suffix)
+        original_columns = []
+        for col in existing_df.columns:
+            if col in changed_records.columns:
+                original_columns.append(col)
+            elif f"{col}_new" in changed_records.columns:
+                original_columns.append(f"{col}_new")
+        
+        # Create result dataframe with original structure
+        result_df = changed_records[original_columns].copy()
+        
+        # Rename columns back to original names (remove _new suffix)
+        column_mapping = {col: col.replace('_new', '') for col in result_df.columns if col.endswith('_new')}
+        result_df = result_df.rename(columns=column_mapping)
+        
+        log_step(f"    {object_type} changes detected", f"{len(result_df)} out of {len(existing_df)} records need updates")
+        return result_df
     else:
         log_step(f"    {object_type} changes detected", f"0 out of {len(existing_df)} records need updates")
         return existing_df.iloc[0:0].copy()
@@ -528,6 +547,20 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         # Ensure Record ID is integer (for new records that have Record IDs)
         if 'Record ID' in facilities_new.columns:
             facilities_new['Record ID'] = pd.to_numeric(facilities_new['Record ID'], errors='coerce').astype('Int64')
+        
+        # Clean data: Remove duplicates and invalid records
+        log_step("    Cleaning new facilities data")
+        original_count = len(facilities_new)
+        
+        # Remove records with missing CCN
+        facilities_new = facilities_new[facilities_new['CCN'].notna() & (facilities_new['CCN'] != '')]
+        
+        # Remove duplicates based on CCN (keep first occurrence)
+        facilities_new = facilities_new.drop_duplicates(subset=['CCN'], keep='first')
+        
+        cleaned_count = len(facilities_new)
+        log_step(f"    Data cleaning", f"Removed {original_count - cleaned_count} duplicate/invalid records")
+        
         facilities_new.to_csv("hubspot_import/step1_new_records/facilities_new.csv", index=False)
         log_step("    Saved", "hubspot_import/step1_new_records/facilities_new.csv")
     
@@ -535,6 +568,20 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         # Ensure Record ID is integer (for new records that have Record IDs)
         if 'Record ID' in companies_new.columns:
             companies_new['Record ID'] = pd.to_numeric(companies_new['Record ID'], errors='coerce').astype('Int64')
+        
+        # Clean data: Remove duplicates and invalid records
+        log_step("    Cleaning new companies data")
+        original_count = len(companies_new)
+        
+        # Remove records with missing DHC ID
+        companies_new = companies_new[companies_new['DHC ID'].notna() & (companies_new['DHC ID'] != '')]
+        
+        # Remove duplicates based on DHC ID (keep first occurrence)
+        companies_new = companies_new.drop_duplicates(subset=['DHC ID'], keep='first')
+        
+        cleaned_count = len(companies_new)
+        log_step(f"    Data cleaning", f"Removed {original_count - cleaned_count} duplicate/invalid records")
+        
         companies_new.to_csv("hubspot_import/step1_new_records/companies_new.csv", index=False)
         log_step("    Saved", "hubspot_import/step1_new_records/companies_new.csv")
     
@@ -542,6 +589,20 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         # Ensure Record ID is integer (for new records that have Record IDs)
         if 'Record ID' in contacts_new.columns:
             contacts_new['Record ID'] = pd.to_numeric(contacts_new['Record ID'], errors='coerce').astype('Int64')
+        
+        # Clean data: Remove duplicates and invalid records
+        log_step("    Cleaning new contacts data")
+        original_count = len(contacts_new)
+        
+        # Remove records with missing DHC ID
+        contacts_new = contacts_new[contacts_new['DHC ID'].notna() & (contacts_new['DHC ID'] != '')]
+        
+        # Remove duplicates based on DHC ID (keep first occurrence)
+        contacts_new = contacts_new.drop_duplicates(subset=['DHC ID'], keep='first')
+        
+        cleaned_count = len(contacts_new)
+        log_step(f"    Data cleaning", f"Removed {original_count - cleaned_count} duplicate/invalid records")
+        
         contacts_new.to_csv("hubspot_import/step1_new_records/contacts_new.csv", index=False)
         log_step("    Saved", "hubspot_import/step1_new_records/contacts_new.csv")
     
@@ -554,18 +615,68 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         # Remove pipeline columns from update files (these are only for new records)
         facilities_existing_clean = facilities_existing.drop(columns=['Facility pipeline', 'Facility pipeline stage'], errors='ignore')
         
+        # Clean data: Remove duplicates and invalid records
+        log_step("    Cleaning facilities data")
+        original_count = len(facilities_existing_clean)
+        
+        # Remove records with missing CCN
+        facilities_existing_clean = facilities_existing_clean[facilities_existing_clean['CCN'].notna() & (facilities_existing_clean['CCN'] != '')]
+        
+        # Remove duplicates based on CCN (keep first occurrence)
+        facilities_existing_clean = facilities_existing_clean.drop_duplicates(subset=['CCN'], keep='first')
+        
+        # Remove duplicates based on Record ID (keep first occurrence)
+        facilities_existing_clean = facilities_existing_clean.drop_duplicates(subset=['Record ID'], keep='first')
+        
+        cleaned_count = len(facilities_existing_clean)
+        log_step(f"    Data cleaning", f"Removed {original_count - cleaned_count} duplicate/invalid records")
+        
         facilities_existing_clean.to_csv("hubspot_import/step2_updates/facilities_updates.csv", index=False)
         log_step("    Saved", "hubspot_import/step2_updates/facilities_updates.csv")
     
     if not companies_existing.empty:
         # Ensure Record ID is integer
         companies_existing['Record ID'] = pd.to_numeric(companies_existing['Record ID'], errors='coerce').astype('Int64')
+        
+        # Clean data: Remove duplicates and invalid records
+        log_step("    Cleaning companies data")
+        original_count = len(companies_existing)
+        
+        # Remove records with missing DHC ID
+        companies_existing = companies_existing[companies_existing['DHC ID'].notna() & (companies_existing['DHC ID'] != '')]
+        
+        # Remove duplicates based on DHC ID (keep first occurrence)
+        companies_existing = companies_existing.drop_duplicates(subset=['DHC ID'], keep='first')
+        
+        # Remove duplicates based on Record ID (keep first occurrence)
+        companies_existing = companies_existing.drop_duplicates(subset=['Record ID'], keep='first')
+        
+        cleaned_count = len(companies_existing)
+        log_step(f"    Data cleaning", f"Removed {original_count - cleaned_count} duplicate/invalid records")
+        
         companies_existing.to_csv("hubspot_import/step2_updates/companies_updates.csv", index=False)
         log_step("    Saved", "hubspot_import/step2_updates/companies_updates.csv")
     
     if not contacts_existing.empty:
         # Ensure Record ID is integer
         contacts_existing['Record ID'] = pd.to_numeric(contacts_existing['Record ID'], errors='coerce').astype('Int64')
+        
+        # Clean data: Remove duplicates and invalid records
+        log_step("    Cleaning contacts data")
+        original_count = len(contacts_existing)
+        
+        # Remove records with missing DHC ID
+        contacts_existing = contacts_existing[contacts_existing['DHC ID'].notna() & (contacts_existing['DHC ID'] != '')]
+        
+        # Remove duplicates based on DHC ID (keep first occurrence)
+        contacts_existing = contacts_existing.drop_duplicates(subset=['DHC ID'], keep='first')
+        
+        # Remove duplicates based on Record ID (keep first occurrence)
+        contacts_existing = contacts_existing.drop_duplicates(subset=['Record ID'], keep='first')
+        
+        cleaned_count = len(contacts_existing)
+        log_step(f"    Data cleaning", f"Removed {original_count - cleaned_count} duplicate/invalid records")
+        
         contacts_existing.to_csv("hubspot_import/step2_updates/contacts_updates.csv", index=False)
         log_step("    Saved", "hubspot_import/step2_updates/contacts_updates.csv")
     
