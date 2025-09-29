@@ -883,7 +883,7 @@ def process_contact_associations():
     return contact_facility_associations, contact_company_associations_df
 
 def match_associations_with_record_ids(facility_company_df, contact_facility_df, contact_company_df):
-    """Match associations with HubSpot Record IDs"""
+    """Match associations with HubSpot Record IDs and add customer status information"""
     log_step("Matching associations with Record IDs")
     
     # Load HubSpot data with optimized settings
@@ -898,14 +898,14 @@ def match_associations_with_record_ids(facility_company_df, contact_facility_df,
         (hubspot_facilities['DHC ID'] != '') & 
         (hubspot_facilities['Record ID'].notna()) & 
         (hubspot_facilities['Record ID'] != '')
-    ][['DHC ID', 'Record ID']].copy()
+    ][['DHC ID', 'Record ID', 'Gemini Status', 'Tricura Status']].copy()
     
     company_lookup = hubspot_companies[
         (hubspot_companies['DHC ID'].notna()) & 
         (hubspot_companies['DHC ID'] != '') & 
         (hubspot_companies['Record ID'].notna()) & 
         (hubspot_companies['Record ID'] != '')
-    ][['DHC ID', 'Record ID']].copy()
+    ][['DHC ID', 'Record ID', '# Customers Gemini', '# Customers Tricura', '# Prospects Gemini', '# Prospects Tricura']].copy()
     
     contact_lookup = hubspot_contacts[
         (hubspot_contacts['DHC ID'].notna()) & 
@@ -924,6 +924,15 @@ def match_associations_with_record_ids(facility_company_df, contact_facility_df,
     company_dhc_to_record = dict(zip(company_lookup['DHC ID'], company_lookup['Record ID']))
     contact_dhc_to_record = dict(zip(contact_lookup['DHC ID'], contact_lookup['Record ID']))
     
+    # Create customer status lookup dictionaries
+    facility_dhc_to_gemini_status = dict(zip(facility_lookup['DHC ID'], facility_lookup['Gemini Status']))
+    facility_dhc_to_tricura_status = dict(zip(facility_lookup['DHC ID'], facility_lookup['Tricura Status']))
+    
+    company_dhc_to_gemini_customers = dict(zip(company_lookup['DHC ID'], company_lookup['# Customers Gemini']))
+    company_dhc_to_tricura_customers = dict(zip(company_lookup['DHC ID'], company_lookup['# Customers Tricura']))
+    company_dhc_to_gemini_prospects = dict(zip(company_lookup['DHC ID'], company_lookup['# Prospects Gemini']))
+    company_dhc_to_tricura_prospects = dict(zip(company_lookup['DHC ID'], company_lookup['# Prospects Tricura']))
+    
     # Add Record IDs using vectorized operations
     facility_company_df['Facility Record ID'] = facility_company_df['Facility DHC ID'].map(facility_dhc_to_record).fillna('')
     facility_company_df['Company Record ID'] = facility_company_df['Company DHC ID'].map(company_dhc_to_record).fillna('')
@@ -933,6 +942,22 @@ def match_associations_with_record_ids(facility_company_df, contact_facility_df,
     
     contact_company_df['Contact Record ID'] = contact_company_df['Contact DHC ID'].map(contact_dhc_to_record).fillna('')
     contact_company_df['Company Record ID'] = contact_company_df['Company DHC ID'].map(company_dhc_to_record).fillna('')
+    
+    # Add customer status information
+    facility_company_df['Facility Gemini Status'] = facility_company_df['Facility DHC ID'].map(facility_dhc_to_gemini_status).fillna('None')
+    facility_company_df['Facility Tricura Status'] = facility_company_df['Facility DHC ID'].map(facility_dhc_to_tricura_status).fillna('None')
+    facility_company_df['Company Gemini Customers'] = facility_company_df['Company DHC ID'].map(company_dhc_to_gemini_customers).fillna(0)
+    facility_company_df['Company Tricura Customers'] = facility_company_df['Company DHC ID'].map(company_dhc_to_tricura_customers).fillna(0)
+    facility_company_df['Company Gemini Prospects'] = facility_company_df['Company DHC ID'].map(company_dhc_to_gemini_prospects).fillna(0)
+    facility_company_df['Company Tricura Prospects'] = facility_company_df['Company DHC ID'].map(company_dhc_to_tricura_prospects).fillna(0)
+    
+    contact_facility_df['Facility Gemini Status'] = contact_facility_df['Facility DHC ID'].map(facility_dhc_to_gemini_status).fillna('None')
+    contact_facility_df['Facility Tricura Status'] = contact_facility_df['Facility DHC ID'].map(facility_dhc_to_tricura_status).fillna('None')
+    
+    contact_company_df['Company Gemini Customers'] = contact_company_df['Company DHC ID'].map(company_dhc_to_gemini_customers).fillna(0)
+    contact_company_df['Company Tricura Customers'] = contact_company_df['Company DHC ID'].map(company_dhc_to_tricura_customers).fillna(0)
+    contact_company_df['Company Gemini Prospects'] = contact_company_df['Company DHC ID'].map(company_dhc_to_gemini_prospects).fillna(0)
+    contact_company_df['Company Tricura Prospects'] = contact_company_df['Company DHC ID'].map(company_dhc_to_tricura_prospects).fillna(0)
     
     # Count matches
     facility_company_matches = len(facility_company_df[
@@ -954,8 +979,47 @@ def match_associations_with_record_ids(facility_company_df, contact_facility_df,
     
     return facility_company_df, contact_facility_df, contact_company_df
 
+def is_protected_association(row, association_type):
+    """Determine if an association involves a Gemini/Tricura customer or prospect"""
+    if association_type == 'facility_company':
+        # Check if facility is a Gemini/Tricura customer or prospect
+        facility_gemini = row.get('Facility Gemini Status', 'None')
+        facility_tricura = row.get('Facility Tricura Status', 'None')
+        
+        # Check if company has Gemini/Tricura customers or prospects
+        company_gemini_customers = row.get('Company Gemini Customers', 0)
+        company_tricura_customers = row.get('Company Tricura Customers', 0)
+        company_gemini_prospects = row.get('Company Gemini Prospects', 0)
+        company_tricura_prospects = row.get('Company Tricura Prospects', 0)
+        
+        # Protected if facility is customer/prospect OR company has customers/prospects
+        facility_protected = facility_gemini in ['Customer', 'Prospect'] or facility_tricura in ['Customer', 'Prospect']
+        company_protected = (company_gemini_customers > 0 or company_tricura_customers > 0 or 
+                           company_gemini_prospects > 0 or company_tricura_prospects > 0)
+        
+        return facility_protected or company_protected
+        
+    elif association_type == 'contact_facility':
+        # Check if facility is a Gemini/Tricura customer or prospect
+        facility_gemini = row.get('Facility Gemini Status', 'None')
+        facility_tricura = row.get('Facility Tricura Status', 'None')
+        
+        return facility_gemini in ['Customer', 'Prospect'] or facility_tricura in ['Customer', 'Prospect']
+        
+    elif association_type == 'contact_company':
+        # Check if company has Gemini/Tricura customers or prospects
+        company_gemini_customers = row.get('Company Gemini Customers', 0)
+        company_tricura_customers = row.get('Company Tricura Customers', 0)
+        company_gemini_prospects = row.get('Company Gemini Prospects', 0)
+        company_tricura_prospects = row.get('Company Tricura Prospects', 0)
+        
+        return (company_gemini_customers > 0 or company_tricura_customers > 0 or 
+                company_gemini_prospects > 0 or company_tricura_prospects > 0)
+    
+    return False
+
 def process_association_changes(facility_company_df, contact_facility_df, contact_company_df):
-    """Process associations into add/remove files"""
+    """Process associations into add/remove files, split by customer status"""
     log_step("Processing association changes")
     
     # Load current HubSpot associations
@@ -984,8 +1048,8 @@ def process_association_changes(facility_company_df, contact_facility_df, contac
         contact_company_changes = process_contact_company_changes(contact_company_df, hubspot_contacts)
         association_changes['contact_company'] = contact_company_changes
     
-    # Save the processed files
-    save_processed_associations(association_changes)
+    # Save the processed files with customer status-based splitting
+    save_processed_associations(association_changes, facility_company_df, contact_facility_df, contact_company_df)
     
     return {
         'facility_company': len(facility_company_df),
@@ -1211,25 +1275,200 @@ def process_contact_company_changes(contact_company_df, hubspot_contacts):
     
     return {'add': add_df, 'remove': remove_df}
 
-def save_processed_associations(association_changes):
-    """Save processed association files to add/remove folders"""
+def save_processed_associations(association_changes, facility_company_df=None, contact_facility_df=None, contact_company_df=None):
+    """Save processed association files to add/remove folders, split by customer status"""
     log_step("Saving processed association files")
     
+    # Create protected and standard directories
+    os.makedirs("hubspot_import/step3_associations/protected/add", exist_ok=True)
+    os.makedirs("hubspot_import/step3_associations/protected/remove", exist_ok=True)
+    os.makedirs("hubspot_import/step3_associations/standard/add", exist_ok=True)
+    os.makedirs("hubspot_import/step3_associations/standard/remove", exist_ok=True)
+    
+    # Get the original association data with customer status information
     for assoc_type, changes in association_changes.items():
         add_df = changes['add']
         remove_df = changes['remove']
         
-        # Save add files
-        if not add_df.empty:
-            add_df.to_csv(f"hubspot_import/step3_associations/add/{assoc_type}_add.csv", index=False)
-            log_step(f"  Saved {assoc_type} add", f"{len(add_df)} associations")
+        # Get the original association data for this type
+        if assoc_type == 'facility_company' and facility_company_df is not None:
+            original_df = facility_company_df
+        elif assoc_type == 'contact_facility' and contact_facility_df is not None:
+            original_df = contact_facility_df
+        elif assoc_type == 'contact_company' and contact_company_df is not None:
+            original_df = contact_company_df
+        else:
+            original_df = None
         
-        # Save remove files
-        if not remove_df.empty:
-            remove_df.to_csv(f"hubspot_import/step3_associations/remove/{assoc_type}_remove.csv", index=False)
-            log_step(f"  Saved {assoc_type} remove", f"{len(remove_df)} associations")
+        # Split add associations by customer status using vectorized operations
+        if not add_df.empty and original_df is not None:
+            # Create lookup dictionaries for fast lookup
+            if assoc_type == 'facility_company':
+                # Create facility status lookup
+                facility_status_lookup = {}
+                for _, row in original_df.iterrows():
+                    facility_record_id = row.get('Facility Record ID', '')
+                    if facility_record_id:
+                        facility_gemini = row.get('Facility Gemini Status', 'None')
+                        facility_tricura = row.get('Facility Tricura Status', 'None')
+                        is_customer_prospect = (facility_gemini in ['Customer', 'Prospect'] or 
+                                              facility_tricura in ['Customer', 'Prospect'])
+                        facility_status_lookup[facility_record_id] = is_customer_prospect
+                
+                # Create company status lookup
+                company_status_lookup = {}
+                for _, row in original_df.iterrows():
+                    company_record_id = row.get('Company Record ID', '')
+                    if company_record_id:
+                        company_gemini_customers = row.get('Company Gemini Customers', 0)
+                        company_tricura_customers = row.get('Company Tricura Customers', 0)
+                        company_gemini_prospects = row.get('Company Gemini Prospects', 0)
+                        company_tricura_prospects = row.get('Company Tricura Prospects', 0)
+                        is_customer_prospect = (company_gemini_customers > 0 or company_tricura_customers > 0 or 
+                                              company_gemini_prospects > 0 or company_tricura_prospects > 0)
+                        company_status_lookup[company_record_id] = is_customer_prospect
+                
+                # Vectorized check for protected associations
+                facility_protected = add_df['Record ID'].map(facility_status_lookup).fillna(False)
+                company_protected = add_df['Association ID'].map(company_status_lookup).fillna(False)
+                protected_mask = facility_protected | company_protected
+                
+            elif assoc_type == 'contact_facility':
+                # Create facility status lookup
+                facility_status_lookup = {}
+                for _, row in original_df.iterrows():
+                    facility_record_id = row.get('Facility Record ID', '')
+                    if facility_record_id:
+                        facility_gemini = row.get('Facility Gemini Status', 'None')
+                        facility_tricura = row.get('Facility Tricura Status', 'None')
+                        is_customer_prospect = (facility_gemini in ['Customer', 'Prospect'] or 
+                                              facility_tricura in ['Customer', 'Prospect'])
+                        facility_status_lookup[facility_record_id] = is_customer_prospect
+                
+                # Vectorized check for protected associations
+                protected_mask = add_df['Association ID'].map(facility_status_lookup).fillna(False)
+                
+            elif assoc_type == 'contact_company':
+                # Create company status lookup
+                company_status_lookup = {}
+                for _, row in original_df.iterrows():
+                    company_record_id = row.get('Company Record ID', '')
+                    if company_record_id:
+                        company_gemini_customers = row.get('Company Gemini Customers', 0)
+                        company_tricura_customers = row.get('Company Tricura Customers', 0)
+                        company_gemini_prospects = row.get('Company Gemini Prospects', 0)
+                        company_tricura_prospects = row.get('Company Tricura Prospects', 0)
+                        is_customer_prospect = (company_gemini_customers > 0 or company_tricura_customers > 0 or 
+                                              company_gemini_prospects > 0 or company_tricura_prospects > 0)
+                        company_status_lookup[company_record_id] = is_customer_prospect
+                
+                # Vectorized check for protected associations
+                protected_mask = add_df['Association ID'].map(company_status_lookup).fillna(False)
+            
+            # Split the dataframe using the mask
+            add_protected = add_df[protected_mask]
+            add_standard = add_df[~protected_mask]
+            
+            log_step(f"  Split {assoc_type} add", f"Protected: {len(add_protected)}, Standard: {len(add_standard)}")
+        else:
+            # Fallback: put all in standard
+            add_protected = add_df.iloc[0:0]  # Empty dataframe
+            add_standard = add_df.copy()
+        
+        # Split remove associations by customer status using vectorized operations
+        if not remove_df.empty and original_df is not None:
+            # Reuse the same lookup logic as add associations
+            if assoc_type == 'facility_company':
+                # Create facility status lookup
+                facility_status_lookup = {}
+                for _, row in original_df.iterrows():
+                    facility_record_id = row.get('Facility Record ID', '')
+                    if facility_record_id:
+                        facility_gemini = row.get('Facility Gemini Status', 'None')
+                        facility_tricura = row.get('Facility Tricura Status', 'None')
+                        is_customer_prospect = (facility_gemini in ['Customer', 'Prospect'] or 
+                                              facility_tricura in ['Customer', 'Prospect'])
+                        facility_status_lookup[facility_record_id] = is_customer_prospect
+                
+                # Create company status lookup
+                company_status_lookup = {}
+                for _, row in original_df.iterrows():
+                    company_record_id = row.get('Company Record ID', '')
+                    if company_record_id:
+                        company_gemini_customers = row.get('Company Gemini Customers', 0)
+                        company_tricura_customers = row.get('Company Tricura Customers', 0)
+                        company_gemini_prospects = row.get('Company Gemini Prospects', 0)
+                        company_tricura_prospects = row.get('Company Tricura Prospects', 0)
+                        is_customer_prospect = (company_gemini_customers > 0 or company_tricura_customers > 0 or 
+                                              company_gemini_prospects > 0 or company_tricura_prospects > 0)
+                        company_status_lookup[company_record_id] = is_customer_prospect
+                
+                # Vectorized check for protected associations
+                facility_protected = remove_df['Record ID'].map(facility_status_lookup).fillna(False)
+                company_protected = remove_df['Association ID'].map(company_status_lookup).fillna(False)
+                protected_mask = facility_protected | company_protected
+                
+            elif assoc_type == 'contact_facility':
+                # Create facility status lookup
+                facility_status_lookup = {}
+                for _, row in original_df.iterrows():
+                    facility_record_id = row.get('Facility Record ID', '')
+                    if facility_record_id:
+                        facility_gemini = row.get('Facility Gemini Status', 'None')
+                        facility_tricura = row.get('Facility Tricura Status', 'None')
+                        is_customer_prospect = (facility_gemini in ['Customer', 'Prospect'] or 
+                                              facility_tricura in ['Customer', 'Prospect'])
+                        facility_status_lookup[facility_record_id] = is_customer_prospect
+                
+                # Vectorized check for protected associations
+                protected_mask = remove_df['Association ID'].map(facility_status_lookup).fillna(False)
+                
+            elif assoc_type == 'contact_company':
+                # Create company status lookup
+                company_status_lookup = {}
+                for _, row in original_df.iterrows():
+                    company_record_id = row.get('Company Record ID', '')
+                    if company_record_id:
+                        company_gemini_customers = row.get('Company Gemini Customers', 0)
+                        company_tricura_customers = row.get('Company Tricura Customers', 0)
+                        company_gemini_prospects = row.get('Company Gemini Prospects', 0)
+                        company_tricura_prospects = row.get('Company Tricura Prospects', 0)
+                        is_customer_prospect = (company_gemini_customers > 0 or company_tricura_customers > 0 or 
+                                              company_gemini_prospects > 0 or company_tricura_prospects > 0)
+                        company_status_lookup[company_record_id] = is_customer_prospect
+                
+                # Vectorized check for protected associations
+                protected_mask = remove_df['Association ID'].map(company_status_lookup).fillna(False)
+            
+            # Split the dataframe using the mask
+            remove_protected = remove_df[protected_mask]
+            remove_standard = remove_df[~protected_mask]
+            
+            log_step(f"  Split {assoc_type} remove", f"Protected: {len(remove_protected)}, Standard: {len(remove_standard)}")
+        else:
+            # Fallback: put all in standard
+            remove_protected = remove_df.iloc[0:0]  # Empty dataframe
+            remove_standard = remove_df.copy()
+        
+        # Save protected files
+        if not add_protected.empty:
+            add_protected.to_csv(f"hubspot_import/step3_associations/protected/add/{assoc_type}_add.csv", index=False)
+            log_step(f"  Saved protected {assoc_type} add", f"{len(add_protected)} associations")
+        
+        if not remove_protected.empty:
+            remove_protected.to_csv(f"hubspot_import/step3_associations/protected/remove/{assoc_type}_remove.csv", index=False)
+            log_step(f"  Saved protected {assoc_type} remove", f"{len(remove_protected)} associations")
+        
+        # Save standard files
+        if not add_standard.empty:
+            add_standard.to_csv(f"hubspot_import/step3_associations/standard/add/{assoc_type}_add.csv", index=False)
+            log_step(f"  Saved standard {assoc_type} add", f"{len(add_standard)} associations")
+        
+        if not remove_standard.empty:
+            remove_standard.to_csv(f"hubspot_import/step3_associations/standard/remove/{assoc_type}_remove.csv", index=False)
+            log_step(f"  Saved standard {assoc_type} remove", f"{len(remove_standard)} associations")
     
-    log_step("  Saved files", "hubspot_import/step3_associations/add/ and remove/")
+    log_step("  Saved files", "hubspot_import/step3_associations/protected/ and standard/")
 
 def save_association_files(facility_company_df, contact_facility_df, contact_company_df):
     """Save association files (fallback when no existing data)"""
