@@ -168,9 +168,7 @@ def process_facilities_from_masterorg(master_df):
         axis=1
     )
     
-    # Add pipeline columns
-    facilities_formatted['Facility pipeline'] = 'Gemini Onboarding'
-    facilities_formatted['Facility pipeline stage'] = 'Lead'
+    # Pipeline columns will be added later for new facilities only
     
     # Add Unique Facility Address
     facilities_formatted['Unique Facility Address'] = facilities_formatted["Facility's Address"]
@@ -558,6 +556,10 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         # Remove duplicates based on CCN (keep first occurrence)
         facilities_new = facilities_new.drop_duplicates(subset=['CCN'], keep='first')
         
+        # Add pipeline columns for new facilities only
+        facilities_new['Facility pipeline'] = 'Gemini Onboarding'
+        facilities_new['Facility pipeline stage'] = 'Lead'
+        
         cleaned_count = len(facilities_new)
         log_step(f"    Data cleaning", f"Removed {original_count - cleaned_count} duplicate/invalid records")
         
@@ -612,8 +614,8 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         # Ensure Record ID is integer
         facilities_existing['Record ID'] = pd.to_numeric(facilities_existing['Record ID'], errors='coerce').astype('Int64')
         
-        # Remove pipeline columns from update files (these are only for new records)
-        facilities_existing_clean = facilities_existing.drop(columns=['Facility pipeline', 'Facility pipeline stage'], errors='ignore')
+        # Pipeline columns are not in the base formatted data, so no need to remove them
+        facilities_existing_clean = facilities_existing.copy()
         
         # Clean data: Remove duplicates and invalid records
         log_step("    Cleaning facilities data")
