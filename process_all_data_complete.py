@@ -41,8 +41,11 @@ def format_zip_code(zip_code):
     if pd.isna(zip_code) or zip_code == '':
         return ''
     
-    # Convert to string and remove non-digits
-    zip_str = ''.join(filter(str.isdigit, str(zip_code)))
+    # Convert to string and remove decimals first (handle HubSpot's .0 formatting)
+    zip_str = str(zip_code).replace('.0', '').replace('.', '')
+    
+    # Remove non-digits
+    zip_str = ''.join(filter(str.isdigit, zip_str))
     
     # Take first 5 digits and pad with zeros if needed
     if len(zip_str) >= 5:
@@ -1285,6 +1288,10 @@ def save_processed_associations(association_changes, facility_company_df=None, c
     os.makedirs("hubspot_import/step3_associations/standard/add", exist_ok=True)
     os.makedirs("hubspot_import/step3_associations/standard/remove", exist_ok=True)
     
+    # Filter out associations for facilities/companies without DHC IDs
+    log_step("  Filtering associations by DHC ID presence")
+    association_changes = filter_associations_by_dhc_id(association_changes)
+    
     # Get the original association data with customer status information
     for assoc_type, changes in association_changes.items():
         add_df = changes['add']
@@ -1469,6 +1476,180 @@ def save_processed_associations(association_changes, facility_company_df=None, c
             log_step(f"  Saved standard {assoc_type} remove", f"{len(remove_standard)} associations")
     
     log_step("  Saved files", "hubspot_import/step3_associations/protected/ and standard/")
+    
+    # Create transition review files for facility-company associations
+    create_transition_review_files(facility_company_df)
+
+def create_transition_review_files(facility_company_df):
+    """Create simplified transition review files for facility-company associations"""
+    log_step("Creating transition review files")
+    
+    # Load the protected association files
+    protected_add = pd.read_csv('hubspot_import/step3_associations/protected/add/facility_company_add.csv')
+    protected_remove = pd.read_csv('hubspot_import/step3_associations/protected/remove/facility_company_remove.csv')
+    
+    # Load facility and company data
+    facilities = pd.read_csv('gemini/facilities.csv')
+    companies = pd.read_csv('gemini/companies.csv')
+    
+    log_step(f"  Processing {len(protected_add)} add and {len(protected_remove)} remove associations")
+    
+    # Create lookup dictionaries
+    facility_lookup = {}
+    for _, row in facilities.iterrows():
+        record_id = row.get('Record ID', '')
+        if record_id:
+            facility_lookup[record_id] = {
+                'Name of Facility': row.get('Name of Facility', ''),
+                'CCN': row.get('CCN', ''),
+                'Facility Type': row.get('Facility Type', ''),
+                'Street': row.get('Street', ''),
+                'City': row.get('City', ''),
+                'State': row.get('State', ''),
+                'Zip Code': row.get('Zip Code', ''),
+                'DHC ID': row.get('DHC ID', '')
+            }
+    
+    company_lookup = {}
+    for _, row in companies.iterrows():
+        record_id = row.get('Record ID', '')
+        if record_id:
+            company_lookup[record_id] = row.get('Company name', '')
+    
+    # Create dictionaries to group adds/removes by facility
+    facility_adds = {}
+    facility_removes = {}
+    
+    for _, row in protected_add.iterrows():
+        facility_id = row['Record ID']
+        company_id = row['Association ID']
+        facility_adds[facility_id] = company_id
+    
+    for _, row in protected_remove.iterrows():
+        facility_id = row['Record ID']
+        company_id = row['Association ID']
+        facility_removes[facility_id] = company_id
+    
+    # Create simplified transition records
+    transition_records = []
+    all_facilities = set(facility_adds.keys()) | set(facility_removes.keys())
+    
+    for facility_record_id in all_facilities:
+        facility_info = facility_lookup.get(facility_record_id, {})
+        
+        # Get company names
+        old_company_id = facility_removes.get(facility_record_id, None)
+        new_company_id = facility_adds.get(facility_record_id, None)
+        
+        old_company_name = company_lookup.get(old_company_id, '') if old_company_id else ''
+        new_company_name = company_lookup.get(new_company_id, '') if new_company_id else ''
+        
+        # Determine transition type
+        if old_company_id and new_company_id:
+            transition_type = "COMPANY CHANGE"
+        elif old_company_id and not new_company_id:
+            transition_type = "COMPANY REMOVAL"
+        elif not old_company_id and new_company_id:
+            transition_type = "NEW COMPANY"
+        else:
+            transition_type = "UNKNOWN"
+        
+        # Create simplified record with properly formatted zip code
+        zip_code = facility_info.get('Zip Code', '')
+        if zip_code and str(zip_code) != 'nan':
+            zip_code = format_zip_code(zip_code)  # Use our formatting function
+        else:
+            zip_code = ''
+        
+        facility_address = f"{facility_info.get('Street', '')}, {facility_info.get('City', '')}, {facility_info.get('State', '')} {zip_code}".strip(', ')
+        
+        transition_record = {
+            'Facility Name': facility_info.get('Name of Facility', 'Unknown'),
+            'Facility CCN': facility_info.get('CCN', ''),
+            'Facility Type': facility_info.get('Facility Type', ''),
+            'Facility DHC ID': facility_info.get('DHC ID', ''),
+            'Facility Address': facility_address,
+            'Transition Type': transition_type,
+            'Old Company Name': old_company_name,
+            'New Company Name': new_company_name
+        }
+        
+        transition_records.append(transition_record)
+    
+    # Create DataFrame and save
+    transition_df = pd.DataFrame(transition_records)
+    
+    # Fix Facility DHC ID by removing decimals
+    if 'Facility DHC ID' in transition_df.columns:
+        transition_df['Facility DHC ID'] = transition_df['Facility DHC ID'].astype(str).str.replace(r'\.0+$', '', regex=True)
+        transition_df['Facility DHC ID'] = transition_df['Facility DHC ID'].replace('nan', '')
+    
+    # Create review directory
+    os.makedirs('hubspot_import/step3_associations/review', exist_ok=True)
+    transition_df.to_csv('hubspot_import/step3_associations/review/facility_company_transitions_simple.csv', index=False)
+    
+    log_step(f"  Created transition review file", f"{len(transition_df)} records")
+    
+    # Log transition type breakdown
+    transition_counts = transition_df['Transition Type'].value_counts()
+    for transition_type, count in transition_counts.items():
+        log_step(f"    {transition_type}", f"{count} facilities")
+    
+    return transition_df
+
+def filter_associations_by_dhc_id(association_changes):
+    """Filter out associations for facilities/companies without DHC IDs"""
+    log_step("    Filtering associations without DHC IDs")
+    
+    # Load facility and company data to check DHC IDs
+    facilities = pd.read_csv('gemini/facilities.csv')
+    companies = pd.read_csv('gemini/companies.csv')
+    
+    # Create sets of Record IDs that have DHC IDs
+    facilities_with_dhc = set(facilities[
+        facilities['DHC ID'].notna() & 
+        (facilities['DHC ID'] != '') & 
+        (facilities['DHC ID'].astype(str) != 'nan')
+    ]['Record ID'].tolist())
+    
+    companies_with_dhc = set(companies[
+        companies['DHC ID'].notna() & 
+        (companies['DHC ID'] != '') & 
+        (companies['DHC ID'].astype(str) != 'nan')
+    ]['Record ID'].tolist())
+    
+    log_step(f"    Facilities with DHC ID: {len(facilities_with_dhc)}")
+    log_step(f"    Companies with DHC ID: {len(companies_with_dhc)}")
+    
+    # Filter each association type
+    filtered_changes = {}
+    for assoc_type, changes in association_changes.items():
+        add_df = changes['add']
+        remove_df = changes['remove']
+        
+        original_add_count = len(add_df)
+        original_remove_count = len(remove_df)
+        
+        # Filter add associations - keep only those with DHC IDs
+        filtered_add = add_df[
+            (add_df['Record ID'].isin(facilities_with_dhc)) &
+            (add_df['Association ID'].isin(companies_with_dhc))
+        ]
+        
+        # Filter remove associations - keep only those with DHC IDs
+        filtered_remove = remove_df[
+            (remove_df['Record ID'].isin(facilities_with_dhc)) &
+            (remove_df['Association ID'].isin(companies_with_dhc))
+        ]
+        
+        filtered_changes[assoc_type] = {
+            'add': filtered_add,
+            'remove': filtered_remove
+        }
+        
+        log_step(f"    {assoc_type}: {original_add_count}->{len(filtered_add)} add, {original_remove_count}->{len(filtered_remove)} remove")
+    
+    return filtered_changes
 
 def save_association_files(facility_company_df, contact_facility_df, contact_company_df):
     """Save association files (fallback when no existing data)"""
@@ -1498,8 +1679,6 @@ def main():
     os.makedirs("hubspot_import/step1_new_records", exist_ok=True)
     os.makedirs("hubspot_import/step2_updates", exist_ok=True)
     os.makedirs("hubspot_import/step3_associations", exist_ok=True)
-    os.makedirs("hubspot_import/step3_associations/remove", exist_ok=True)
-    os.makedirs("hubspot_import/step3_associations/add", exist_ok=True)
     os.makedirs("hubspot_import/raw_data", exist_ok=True)
     
     try:
