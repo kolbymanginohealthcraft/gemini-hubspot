@@ -662,6 +662,11 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         
         facilities_existing_clean.to_csv("hubspot_import/step2_updates/facilities_updates.csv", index=False)
         log_step("    Saved", "hubspot_import/step2_updates/facilities_updates.csv")
+    else:
+        # Create empty file when there are no facilities to update
+        empty_df = pd.DataFrame(columns=['Name of Facility', 'CCN', 'Facility Type', 'Street', 'City', 'State', 'Zip Code', 'Phone Number', 'NPI', 'Facility website', 'Total Beds', 'DHC ID', "Facility's Address", 'Unique Facility Address', 'Record ID'])
+        empty_df.to_csv("hubspot_import/step2_updates/facilities_updates.csv", index=False)
+        log_step("    Saved", "hubspot_import/step2_updates/facilities_updates.csv (empty)")
     
     if not companies_existing.empty:
         # Ensure Record ID is integer
@@ -685,6 +690,11 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         
         companies_existing.to_csv("hubspot_import/step2_updates/companies_updates.csv", index=False)
         log_step("    Saved", "hubspot_import/step2_updates/companies_updates.csv")
+    else:
+        # Create empty file when there are no companies to update
+        empty_df = pd.DataFrame(columns=['Company name', 'DHC ID', 'Street Address', 'City', 'State/Region', 'Postal Code', 'Phone Number', 'Website URL', 'Country/Region', 'HQ Unique Address', 'Record ID'])
+        empty_df.to_csv("hubspot_import/step2_updates/companies_updates.csv", index=False)
+        log_step("    Saved", "hubspot_import/step2_updates/companies_updates.csv (empty)")
     
     if not contacts_existing.empty:
         # Ensure Record ID is integer
@@ -708,6 +718,11 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         
         contacts_existing.to_csv("hubspot_import/step2_updates/contacts_updates.csv", index=False)
         log_step("    Saved", "hubspot_import/step2_updates/contacts_updates.csv")
+    else:
+        # Create empty file when there are no contacts to update
+        empty_df = pd.DataFrame(columns=['First Name', 'Last Name', 'DHC ID', 'Job Title', 'Email', 'Record ID'])
+        empty_df.to_csv("hubspot_import/step2_updates/contacts_updates.csv", index=False)
+        log_step("    Saved", "hubspot_import/step2_updates/contacts_updates.csv (empty)")
     
     return {
         'facilities_new': len(facilities_new),
