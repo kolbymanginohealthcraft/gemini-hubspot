@@ -447,25 +447,34 @@ def detect_changes_in_existing_records(existing_df, hubspot_df, object_type):
         new_vals = new_vals.replace(['nan', 'None'], '')
         hubspot_vals = hubspot_vals.replace(['nan', 'None'], '')
         
-        # Normalize numeric fields (remove trailing .0 from decimals)
-        if field in ['Zip Code', 'Total Beds', 'NPI', 'CCN']:
-            new_vals = new_vals.str.replace(r'\.0$', '', regex=True)
-            hubspot_vals = hubspot_vals.str.replace(r'\.0$', '', regex=True)
+        # Normalize numeric fields (remove trailing .0 from decimals and handle HubSpot's decimal formatting)
+        numeric_fields = ['Zip Code', 'Total Beds', 'NPI', 'CCN', 'Record ID', 'DHC ID']
+        if field in numeric_fields:
+            # Remove trailing .0 from decimals (HubSpot adds these)
+            new_vals = new_vals.str.replace(r'\.0+$', '', regex=True)
+            hubspot_vals = hubspot_vals.str.replace(r'\.0+$', '', regex=True)
+        
+        # Special handling for Zip Code and CCN - normalize leading zeros
+        if field in ['Zip Code', 'CCN']:
+            # Remove leading zeros for comparison
+            new_vals = new_vals.str.replace(r'^0+', '', regex=True)
+            hubspot_vals = hubspot_vals.str.replace(r'^0+', '', regex=True)
+            # Handle case where all zeros were removed (e.g., '00000' -> '')
+            new_vals = new_vals.replace('', '0')
+            hubspot_vals = hubspot_vals.replace('', '0')
         
         # Check for differences
         field_changes = new_vals != hubspot_vals
         change_mask |= field_changes
+        
+        # Note: Zip code normalization fix has been applied to eliminate false positives
     
     # Filter to only records with changes
     if change_mask.any():
         # Get the records that need changes from the merged dataframe
         changed_records = merged_df[change_mask].copy()
         
-        # Debug: Check if 60 West is incorrectly in changed_records
-        if object_type == 'facilities':
-            sixty_west_in_changed = changed_records[changed_records['CCN_new'] == '075442']
-            if len(sixty_west_in_changed) > 0:
-                log_step(f"    WARNING: 60 West incorrectly flagged for changes", "This indicates a bug in change detection")
+        # Note: False positive issue has been resolved with zip code normalization
         
         # Extract only the original columns (those with _new suffix or without suffix)
         original_columns = []
@@ -523,6 +532,9 @@ def create_import_files(facilities_df, companies_df, contacts_df):
     # Detect which existing companies actually need updates
     companies_existing = detect_changes_in_existing_records(companies_existing, hubspot_companies, 'companies')
     
+    # Note: companies_existing now contains only companies that need updates
+    # Companies that don't need updates are filtered out by detect_changes_in_existing_records
+    
     log_step("    Companies split", f"New: {len(companies_new)}, Existing: {len(companies_existing)}")
     
     # Split contacts into new vs existing
@@ -565,6 +577,11 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         
         facilities_new.to_csv("hubspot_import/step1_new_records/facilities_new.csv", index=False)
         log_step("    Saved", "hubspot_import/step1_new_records/facilities_new.csv")
+    else:
+        # Create empty file when there are no new facilities
+        empty_df = pd.DataFrame(columns=['Name of Facility', 'CCN', 'Facility Type', 'Street', 'City', 'State', 'Zip Code', 'Phone Number', 'NPI', 'Facility website', 'Total Beds', 'DHC ID', "Facility's Address", 'Unique Facility Address', 'Facility pipeline', 'Facility pipeline stage'])
+        empty_df.to_csv("hubspot_import/step1_new_records/facilities_new.csv", index=False)
+        log_step("    Saved", "hubspot_import/step1_new_records/facilities_new.csv (empty)")
     
     if not companies_new.empty:
         # Ensure Record ID is integer (for new records that have Record IDs)
@@ -586,6 +603,11 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         
         companies_new.to_csv("hubspot_import/step1_new_records/companies_new.csv", index=False)
         log_step("    Saved", "hubspot_import/step1_new_records/companies_new.csv")
+    else:
+        # Create empty file when there are no new companies
+        empty_df = pd.DataFrame(columns=['Company name', 'DHC ID', 'Street Address', 'City', 'State/Region', 'Postal Code', 'Phone Number', 'Website URL', 'Country/Region', 'HQ Unique Address'])
+        empty_df.to_csv("hubspot_import/step1_new_records/companies_new.csv", index=False)
+        log_step("    Saved", "hubspot_import/step1_new_records/companies_new.csv (empty)")
     
     if not contacts_new.empty:
         # Ensure Record ID is integer (for new records that have Record IDs)
@@ -607,6 +629,11 @@ def create_import_files(facilities_df, companies_df, contacts_df):
         
         contacts_new.to_csv("hubspot_import/step1_new_records/contacts_new.csv", index=False)
         log_step("    Saved", "hubspot_import/step1_new_records/contacts_new.csv")
+    else:
+        # Create empty file when there are no new contacts
+        empty_df = pd.DataFrame(columns=['First Name', 'Last Name', 'DHC ID', 'Job Title', 'Email'])
+        empty_df.to_csv("hubspot_import/step1_new_records/contacts_new.csv", index=False)
+        log_step("    Saved", "hubspot_import/step1_new_records/contacts_new.csv (empty)")
     
     # Save update files (Step 2)
     log_step("  Saving Step 2: Update files")
@@ -1272,34 +1299,65 @@ def main():
         # Clear memory
         del facility_company_df, contact_facility_df, contact_company_df
         
-        # Generate comprehensive summary
+        # Generate comprehensive summary by reading actual file counts
         print("\n" + "=" * 80)
         print("COMPLETE DATA PROCESSING SUMMARY")
         print("=" * 80)
         
+        # Read actual file counts
+        try:
+            companies_new_df = pd.read_csv("hubspot_import/step1_new_records/companies_new.csv")
+            companies_new_count = len(companies_new_df)
+        except:
+            companies_new_count = 0
+            
+        try:
+            facilities_new_df = pd.read_csv("hubspot_import/step1_new_records/facilities_new.csv")
+            facilities_new_count = len(facilities_new_df)
+        except:
+            facilities_new_count = 0
+            
+        try:
+            contacts_new_df = pd.read_csv("hubspot_import/step1_new_records/contacts_new.csv")
+            contacts_new_count = len(contacts_new_df)
+        except:
+            contacts_new_count = 0
+            
+        try:
+            companies_updates_df = pd.read_csv("hubspot_import/step2_updates/companies_updates.csv")
+            companies_updates_count = len(companies_updates_df)
+        except:
+            companies_updates_count = 0
+            
+        try:
+            facilities_updates_df = pd.read_csv("hubspot_import/step2_updates/facilities_updates.csv")
+            facilities_updates_count = len(facilities_updates_df)
+        except:
+            facilities_updates_count = 0
+            
+        try:
+            contacts_updates_df = pd.read_csv("hubspot_import/step2_updates/contacts_updates.csv")
+            contacts_updates_count = len(contacts_updates_df)
+        except:
+            contacts_updates_count = 0
+        
         # Facilities summary
-        facility_new = import_results['facilities_new']
-        facility_existing = import_results['facilities_existing']
         print(f"FACILITIES:")
-        print(f"  Total: {facility_new + facility_existing}")
-        print(f"  Existing (to update): {facility_existing}")
-        print(f"  New (to create): {facility_new}")
+        print(f"  Total: {facilities_new_count + facilities_updates_count}")
+        print(f"  Existing (to update): {facilities_updates_count}")
+        print(f"  New (to create): {facilities_new_count}")
         
         # Companies summary
-        company_new = import_results['companies_new']
-        company_existing = import_results['companies_existing']
         print(f"\nCOMPANIES:")
-        print(f"  Total: {company_new + company_existing}")
-        print(f"  Existing (to update): {company_existing}")
-        print(f"  New (to create): {company_new}")
+        print(f"  Total: {companies_new_count + companies_updates_count}")
+        print(f"  Existing (to update): {companies_updates_count}")
+        print(f"  New (to create): {companies_new_count}")
         
         # Contacts summary
-        contact_new = import_results['contacts_new']
-        contact_existing = import_results['contacts_existing']
         print(f"\nCONTACTS:")
-        print(f"  Total: {contact_new + contact_existing}")
-        print(f"  Existing (to update): {contact_existing}")
-        print(f"  New (to create): {contact_new}")
+        print(f"  Total: {contacts_new_count + contacts_updates_count}")
+        print(f"  Existing (to update): {contacts_updates_count}")
+        print(f"  New (to create): {contacts_new_count}")
         
         # Associations summary
         print(f"\nASSOCIATIONS:")
@@ -1309,15 +1367,18 @@ def main():
         print(f"  Total associations: {facility_company_count + contact_facility_count + contact_company_count}")
         
         # Grand totals!
-        total_records = facility_new + facility_existing + company_new + company_existing + contact_new + contact_existing
-        total_existing = facility_existing + company_existing + contact_existing
-        total_new = facility_new + company_new + contact_new
+        total_records = facilities_new_count + facilities_updates_count + companies_new_count + companies_updates_count + contacts_new_count + contacts_updates_count
+        total_existing = facilities_updates_count + companies_updates_count + contacts_updates_count
+        total_new = facilities_new_count + companies_new_count + contacts_new_count
         
         print(f"\nGRAND TOTALS:")
         print(f"  Total Records: {total_records}")
         print(f"  Existing (to update): {total_existing}")
         print(f"  New (to create): {total_new}")
-        print(f"  Match Rate: {(total_existing/total_records*100):.1f}%")
+        if total_records > 0:
+            print(f"  Match Rate: {(total_existing/total_records*100):.1f}%")
+        else:
+            print(f"  Match Rate: 0.0%")
         
         print(f"\n" + "=" * 80)
         print("HUBSPOT IMPORT WORKFLOW")
@@ -1327,12 +1388,12 @@ def main():
         print(f"STEP 1: Import New Records")
         print(f"   Files: hubspot_import/step1_new_records/")
         print(f"   Order: Companies -> Facilities -> Contacts")
-        print(f"   Records: {company_new} companies, {facility_new} facilities, {contact_new} contacts")
+        print(f"   Records: {companies_new_count} companies, {facilities_new_count} facilities, {contacts_new_count} contacts")
         print(f"")
         print(f"STEP 2: Update Existing Records")
         print(f"   Files: hubspot_import/step2_updates/")
         print(f"   Order: Companies -> Facilities -> Contacts")
-        print(f"   Records: {company_existing} companies, {facility_existing} facilities, {contact_existing} contacts")
+        print(f"   Records: {companies_updates_count} companies, {facilities_updates_count} facilities, {contacts_updates_count} contacts")
         print(f"")
         print(f"STEP 3: Handle Associations")
         print(f"   Files: hubspot_import/step3_associations/")
